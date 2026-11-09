@@ -20,10 +20,10 @@
 > non-commercial use only.
 
 <p align="center">
-  <img src="docs/demo.gif" width="760" alt="Demo: while a video plays, lips silently mouth “play Drake on Spotify”; the notch widens with a wave that follows the lips, shows working dots, then drops down with God's Plan by Drake now playing, without leaving the video">
+  <img src="docs/gif-discord.gif" width="760" alt="Demo: lips silently mouth “open Discord and message Alex that I'll be available to meet at 4 PM”; the notch widens with a wave, then shows working dots while Discord opens and the message is typed; the island asks to send, a nod says yes, and the message appears as sent">
 </p>
-<p align="center"><sub>Illustrated demo: the island is the real app's, rendered frame by frame; the mouth is animated.
-Album artwork © its owners, shown as Spotify displays it.</sub></p>
+<p align="center"><sub>Illustrated: the island is the real app's, rendered frame by frame; the mouth is animated, and the
+apps, names and messages are made up.</sub></p>
 
 ## What it does
 
@@ -46,6 +46,27 @@ Album artwork © its owners, shown as Spotify displays it.</sub></p>
 | 👍 **Rate replies** | Thumbs up or down in the island; `/stats` shows how it's doing for you (corrections, speed, false starts). |
 | 💸 **Easy on your plan** | Everyday commands, hands-free filtering and the privacy check run on your Mac. Haiku answers the rest, and only hard requests go to Opus. |
 | 🪶 **Light** | About 2 GB when idle: big models load only when needed, and the camera turns off when you walk away. |
+
+## See it
+
+**Two apps, side by side, in one sentence.**
+
+<p align="center"><img src="docs/gif-split.gif" width="720" alt="Mouthing “open my calendar and to-do list side by side”: a calendar and a task list open and tile left and right"></p>
+
+**Music without leaving your video.** It finds the song with your Spotify account and plays it in the background.
+
+<p align="center"><img src="docs/gif-spotify.gif" width="720" alt="While a video plays, mouthing “play Drake on Spotify” brings up God's Plan by Drake in the island"></p>
+
+**Hands-free that knows when you're not talking to it.** A small model on your Mac crosses out chatter.
+
+<p align="center"><img src="docs/gif-misread.gif" width="720" alt="During a FaceTime call, hands-free picks up “so I'm going to talk a little bit about it”; it's crossed out and the island tucks away"></p>
+
+**Private windows stay private.** A check on your Mac keeps banking, health and password screens from Claude.
+
+<p align="center"><img src="docs/gif-privacy.gif" width="720" alt="With a bank's website in front, asking “what's my balance?” gets: that window looks private, so it wasn't shared"></p>
+
+<sub>Album artwork © its owners, shown as Spotify displays it. All other apps, names and messages are made up.
+`docs/gifs/make_gifs.py` regenerates these.</sub>
 
 <p align="center">
   <img src="docs/island-states.png" width="860" alt="Six island states: listening with a wave that follows your lips, working dots, now playing (SICKO MODE by Travis Scott) with controls, a misread struck through, a reply, and the hover-to-type box">

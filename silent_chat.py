@@ -737,7 +737,13 @@ def run_live(args):
         elif what in ("up", "down"):
             vote_q.put(what)
     vote_q = queue.Queue()
-    isl = island.Island(on_text=lambda t: typed.put(t), on_control=spotify_control, on_tap=island_tap)
+    def sent_from_box(text):
+        """Typed in the island's box: send it, give the keyboard back, and let the island close normally once the
+        reply has been read, even with the mouse still over it (hovering opens it again after you leave)."""
+        typed.put(text)
+        amb["hover_lock"], amb["hover"] = True, False
+        amb["unfocus"] = True
+    isl = island.Island(on_text=sent_from_box, on_control=spotify_control, on_tap=island_tap)
 
     def on_escape(event):
         if event.keyCode() == 53:  # Esc: put the island away
@@ -2582,7 +2588,14 @@ def run_live(args):
                 ix, iy, iw, ih = isl.rect()
                 # hovering the island (or the bare notch) opens the chat with a text box; it closes when you leave
                 mp = NSEvent.mouseLocation()
-                if isl.hit(mp.x, mp.y):
+                if amb.pop("unfocus", False):
+                    isl.unfocus()
+                over = isl.hit(mp.x, mp.y)
+                if amb.get("hover_lock"):
+                    if not over:
+                        amb["hover_lock"] = False  # (the mouse left: hovering works again)
+                    over = False
+                if over:
                     amb["hover_out"] = None
                     amb["hover_in"] = amb.get("hover_in") or now
                 else:
