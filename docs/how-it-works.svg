@@ -1,0 +1,54 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 920 300" width="920" height="300" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif">
+  <defs>
+    <linearGradient id="mac" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#5f9dff"/><stop offset="1" stop-color="#6d4ce6"/>
+    </linearGradient>
+  </defs>
+
+  <!-- you -->
+  <rect x="10" y="40" width="180" height="170" rx="18" fill="#535a68"/>
+  <text x="30" y="72" fill="#fff" font-size="17" font-weight="700">You</text>
+  <text x="30" y="104" fill="#fff" font-size="13.5">👄 mouth words</text>
+  <text x="30" y="134" fill="#fff" font-size="13.5">🗣️ say “Hey Claude”</text>
+  <text x="30" y="164" fill="#fff" font-size="13.5">⌥ hold to dictate</text>
+  <text x="30" y="194" fill="#fff" font-size="13.5">😉 blink · smile · brows</text>
+
+  <line x1="196" y1="125" x2="224" y2="125" stroke="#8b93a1" stroke-width="2.5"/>
+  <path d="M222,118 L233,125 L222,132 z" fill="#8b93a1"/>
+
+  <!-- on your mac -->
+  <rect x="238" y="40" width="236" height="170" rx="18" fill="url(#mac)"/>
+  <text x="258" y="72" fill="#fff" font-size="17" font-weight="700">On your Mac</text>
+  <rect x="254" y="86" width="204" height="30" rx="15" fill="#ffffff" fill-opacity="0.18"/>
+  <text x="270" y="106" fill="#fff" font-size="13.5">Lip-reader (Auto-AVSR)</text>
+  <rect x="254" y="122" width="204" height="30" rx="15" fill="#ffffff" fill-opacity="0.18"/>
+  <text x="270" y="142" fill="#fff" font-size="13.5">Face gestures (MediaPipe)</text>
+  <rect x="254" y="158" width="204" height="30" rx="15" fill="#ffffff" fill-opacity="0.18"/>
+  <text x="270" y="178" fill="#fff" font-size="13.5">Speech-to-text (Whisper)</text>
+
+  <line x1="480" y1="125" x2="508" y2="125" stroke="#8b93a1" stroke-width="2.5"/>
+  <path d="M506,118 L517,125 L506,132 z" fill="#8b93a1"/>
+
+  <!-- claude -->
+  <rect x="522" y="70" width="150" height="110" rx="18" fill="#c8643f"/>
+  <text x="542" y="104" fill="#fff" font-size="17" font-weight="700">Claude</text>
+  <text x="542" y="132" fill="#fff" font-size="13">fixes misreadings,</text>
+  <text x="542" y="150" fill="#fff" font-size="13">answers, plans</text>
+  <text x="542" y="168" fill="#fff" font-size="13">actions</text>
+
+  <line x1="678" y1="125" x2="706" y2="125" stroke="#8b93a1" stroke-width="2.5"/>
+  <path d="M704,118 L715,125 L704,132 z" fill="#8b93a1"/>
+
+  <!-- results -->
+  <rect x="720" y="40" width="190" height="170" rx="18" fill="#1f8f68"/>
+  <text x="740" y="72" fill="#fff" font-size="17" font-weight="700">Results</text>
+  <text x="740" y="104" fill="#fff" font-size="13.5">🔊 spoken reply</text>
+  <text x="740" y="134" fill="#fff" font-size="13.5">⌨️ typed into any app</text>
+  <text x="740" y="164" fill="#fff" font-size="13.5">🖥️ acts in your apps</text>
+  <text x="740" y="194" fill="#fff" font-size="13.5">✅ Todoist · 🎵 Spotify</text>
+
+  <!-- learning loop -->
+  <path d="M597,186 C597,262 356,262 356,226" fill="none" stroke="#8b93a1" stroke-width="2" stroke-dasharray="6 5"/>
+  <path d="M349,228 L356,215 L363,228 z" fill="#8b93a1"/>
+  <text x="476" y="282" fill="#8b93a1" font-size="13" text-anchor="middle">your corrections fine-tune the lip-reader on your own mouth</text>
+</svg>
