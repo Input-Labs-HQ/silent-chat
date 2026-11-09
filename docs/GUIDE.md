@@ -292,12 +292,34 @@ anything because of where you looked; it acts only when you ask, and asks if it 
 * It works on the screen it was calibrated on; recalibrate if you move the laptop or your seat a lot. `/gaze off`
   turns it off. Every calibration's results are kept in `data/silent_chat/gaze_eval.log`.
 
+**More on the island.** Click it to open up more of the conversation (click again to close), and press **Esc**
+anywhere to put it away. Under each reply are a small 👍 and 👎: your ratings go into `feedback.jsonl`, into the
+daily self-improvement, and into `/stats`. With **Suggest replies** on (Settings, off by default), a new message
+notification also shows "Reply? Mouth or say “reply …”".
+
+**It remembers across restarts.** The last few exchanges are kept in `data/silent_chat/recent.json`, and the first
+message after a restart tells Claude what you were just talking about (the last 2 hours). Turn it off with
+**Remember across restarts** in Settings (that also deletes the file).
+
+**How it's doing (`/stats`, or Settings > Show Stats).** From its own logs, over the last week: how many lip-reads
+you went on with vs corrected, how often mouthed instant commands matched, hands-free starts that were real vs
+false, how fast Claude replies (typical and slowest 10%), and your 👍/👎. On this Mac after the first days: 186
+reads went on, 10 needed a correction (5%; Claude also fixes many misreads silently), 7 of 162 mouthed instant
+command tries were clear enough to run, and replies took a typical 2.3 s.
+
+**Power (`/power`).** Measures its own CPU and energy impact for 20 s, as it is right now. Measured: camera off and
+listening for "Hey Claude", about 2% of one core (energy impact ~2); camera on with the glass lens, about 40% of
+one core.
+
 **Settings and first-run setup.** Menu bar > **Settings…** (or `/settings`) has every switch in one window:
 hands-free, "Hey Claude", spoken replies, the notch, screen and gaze awareness, the lens, notifications,
 self-improvement, face gestures and the Claude model, plus Calibrate Gaze and Improve Now. On first start, **Set
 Up Silent Chat** lists the permissions it needs (Camera, Microphone, Accessibility, Input Monitoring, Screen
 Recording, and Claude Code signed in), each with a live check mark and a button to the right System Settings page.
 `/setup` opens it again.
+* **Privacy switches** (Settings): screen awareness, gaze awareness, the glass lens and its screen bending,
+  notifications, **Save mouth clips for training** (off: clips are read and thrown away, nothing new is kept),
+  **Remember across restarts**, and **Learn gaze from clicks**. Each one is off the moment you flip it.
 
 **Memory.** It used to hold 4–5 GB, mostly models idling on the GPU. Now:
 * the big Whisper loads only to transcribe what you say (~0.5 s the first time) and unloads after 2 idle minutes;
@@ -431,6 +453,15 @@ It learns from your sessions in two ways:
    * `heard`: not confirmed yet
 
    Guesses from the hands-free local model are never saved as training data, since nothing confirmed them.
+
+   **Practice (2 min):** Settings > Practice, or `/practice`. The island shows 20 short phrases one at a time
+   (everyday commands, requests, and names you use); hold Option or blink long and mouth each one. It shows what it
+   read, and every clip is saved with its exact text, the best training data there is. Esc stops.
+
+   **Words on your screen help it read you.** After each read, the lip-reader's top guesses are tried again with
+   any word swapped for a name or label in the window in front that looks the same on the lips (p/b/m, f/v,
+   t/d/n/s, k/g …): "message Sara" becomes "message Zara" if Zara is on screen. The lip-reader scores each version
+   against the video and keeps a swap only if it fits clearly better.
 
    Clips marked `confirmed`, `fixed`, `ok` or `audio` are training data. Once there are at least 30, plus 15 new
    ones since the last round, it retrains **in the background** whenever you hide silent chat with `\\` (you're not

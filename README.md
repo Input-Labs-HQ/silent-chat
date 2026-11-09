@@ -9,9 +9,20 @@
   Mouth words at your camera, say “Hey Claude”, or just start talking. It lives in your MacBook's notch.
 </p>
 
+> [!CAUTION]
+> **Privacy & security: read before installing.** Silent Chat is an experimental research project, not a reviewed
+> product. To work it needs your **camera**, **microphone**, **Accessibility** (it can click, type and act in any app
+> as you), **Input Monitoring** and, optionally, **Screen Recording**. Clips of your mouth, logs and settings are
+> stored unencrypted in `data/` on your Mac. What you say or type, a privacy-filtered summary of the window in front
+> and what Claude reads on screen are sent to Anthropic through your Claude Code account. The privacy check is best
+> effort and can miss things: turn off screen and gaze awareness in Settings when sensitive information is on screen,
+> and review the code before you trust it with your accounts. The lip-reading model is for research and
+> non-commercial use only.
+
 <p align="center">
-  <img src="docs/island.png" width="760" alt="Silent Chat's Dynamic Island hanging from the MacBook notch, showing a question and Claude's reply">
+  <img src="docs/demo.gif" width="760" alt="Demo: while a video plays, lips silently mouth “play Drake on Spotify”; the notch widens with a wave that follows the lips, shows working dots, then drops down with God's Plan by Drake now playing, without leaving the video">
 </p>
+<p align="center"><sub>Illustrated demo: the island is the real app's, rendered frame by frame; the lips are animated.</sub></p>
 
 ## What it does
 
@@ -30,7 +41,8 @@
 | 🌱 **Builds its own features** | Learns shortcuts and per-app tips from how you use it, tweaks the ones you use, and removes ones you haven't used for 7 days. |
 | 🔔 **Notifications** | New ones drop down from the notch; say “reply …” and Claude drafts it, then asks. |
 | 🙂 **Nod or shake** | Answer Claude's yes/no questions with your head, tracked by your AirPods when they're in. |
-| 📈 **Learns you** | Fine-tunes the lip-reader on clips of your own mouth. |
+| 📈 **Learns you** | Fine-tunes the lip-reader on clips of your own mouth, with a 2-minute practice mode to speed it up. Names and labels on your screen are favoured when it reads your lips. |
+| 👍 **Rate replies** | Thumbs up or down in the island; `/stats` shows how it's doing for you (corrections, speed, false starts). |
 | 💸 **Easy on your plan** | Everyday commands, hands-free filtering and the privacy check run on your Mac. Haiku answers the rest, and only hard requests go to Opus. |
 | 🪶 **Light** | About 2 GB when idle: big models load only when needed, and the camera turns off when you walk away. |
 
@@ -65,6 +77,7 @@ to turn the camera on.
 | Hold <kbd>⌥</kbd> and mouth or speak | Talk to Claude, or dictate into the app in front |
 | Say “Hey Claude, …” | Talk out loud |
 | Hover over the notch | See the conversation and type |
+| Click the island · press Esc | More history · put it away |
 | Long blink · smile · raise eyebrows | Listen · delete a word · Enter |
 | Nod · shake your head | Yes · no, when Claude asks |
 | Tap <kbd>\\</kbd> while Claude is working | Stop it |

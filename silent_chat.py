@@ -341,18 +341,71 @@ def fifo_reader(q, path):
 
 # ----------------------------------------------------------------------------- live mode (hold Option / smile)
 
-def lipread(reader, frames, stamps, clip, io_pool, audio=None, transcriber=None, vocabulary=(), candidates=None):
+SAVE_CLIPS = [True]  # Settings > "Save mouth clips for training" (off: clips are read, then thrown away)
+
+
+# lips look the same for these sounds (visemes): a misread usually swaps within a group
+VISEME = {**{c: "P" for c in "pbm"}, **{c: "F" for c in "fv"}, **{c: "T" for c in "tdnszl"}, **{c: "K" for c in "kgqcx"},
+          **{c: "S" for c in "jy"}, "r": "R", "w": "W", "h": "", **{c: "A" for c in "aeiou"}}
+
+
+def _visemes(word):
+    w = word.lower()
+    w = w.replace("ch", "j").replace("sh", "j").replace("th", "t").replace("ph", "f").replace("ck", "k")
+    out = "".join(VISEME.get(c, "") for c in w)
+    return "".join(c for i, c in enumerate(out) if i == 0 or c != out[i - 1])  # (repeats look like one)
+
+
+def _close(a, b):
+    """Edit distance between viseme strings, relative to length."""
+    import difflib
+    if not a or not b:
+        return 1.0
+    return 1 - difflib.SequenceMatcher(None, a, b).ratio()
+
+
+def screen_variants(hyps, words, limit=24):
+    """The top guesses with a word swapped for an on-screen word that looks alike on the lips
+    ('SARA' -> 'Zara' if Zara is in the window in front)."""
+    words = {w for w in words if len(w) >= 3}
+    vis = {w: _visemes(w) for w in words}
+    out = []
+    for text, _ in hyps[:3]:
+        toks = text.split()
+        for i, t in enumerate(toks):
+            vt = _visemes(t)
+            for w, vw in vis.items():
+                if (w.lower() != t.lower() and vt[:1] == vw[:1] and 0.75 <= len(vw) / max(1, len(vt)) <= 1.34
+                        and _close(vt, vw) <= 0.3):
+                    v = " ".join(toks[:i] + [w.upper()] + toks[i + 1:])
+                    if v not in out and v != text:
+                        out.append(v)
+    return out[:limit]
+
+
+def lipread(reader, frames, stamps, clip, io_pool, audio=None, transcriber=None, vocabulary=(), candidates=None,
+            screen_words=()):
     """Captured frames -> lip-reader n-best (+ speech-to-text if the mic was on). The clip is saved in the
     background, off the critical path. candidates() -> [(phrase, action)]: also scores those phrases against the
     clip (closed-set lip-reading for instant commands); the best is in result["closed"]."""
     spoken = transcriber(audio, vocabulary) if audio is not None and transcriber is not None else ""
     video = vsr.resample_to_fps(frames, stamps)
-    io_pool.submit(vsr.write_video, video, clip, pix_fmt="bgr24")
+    if SAVE_CLIPS[0]:
+        io_pool.submit(vsr.write_video, video, clip, pix_fmt="bgr24")
     crops, _ = reader.mouth_crops(np.ascontiguousarray(video[..., ::-1]))
     enc = reader.encode(crops)
     hyps = reader.decode_enc(enc, nbest=10)
     result = {"clip": clip, "hyps": hyps, "typed": None, "spoken": spoken, "closed": None}
     cands = candidates() if candidates and not spoken else []
+    variants = screen_variants(hyps, screen_words) if screen_words and not spoken else []
+    if variants:  # an on-screen word that fits the video better than the lip-reader's own guess moves to the top
+        t0 = time.perf_counter()
+        scored = dict(reader.score(enc, [hyps[0][0]] + variants))
+        best = max(variants, key=lambda v: scored[v])
+        if scored[best] > scored[hyps[0][0]] + 0.5:
+            hyps.insert(0, (best, scored[best]))
+            result["biased"] = {"from": hyps[1][0], "to": best, "gain": round(scored[best] - scored[hyps[1][0]], 2),
+                                "ms": round((time.perf_counter() - t0) * 1000)}
     if len(cands) >= 2:
         t0 = time.perf_counter()
         scored = reader.score(enc, [p for p, _ in cands])
@@ -676,7 +729,24 @@ def run_live(args):
                                                        capture_output=True), daemon=True).start()
         now_playing_soon(0.5)
 
-    isl = island.Island(on_text=lambda t: typed.put(t), on_control=spotify_control)
+    def island_tap(what):
+        """A click on the island: open it up with more of the conversation (click again to close), or a vote."""
+        if what == "island":
+            amb["history_open"] = not amb.get("history_open")
+            isl.max_text = 440.0 if amb["history_open"] else 220.0
+        elif what in ("up", "down"):
+            vote_q.put(what)
+    vote_q = queue.Queue()
+    isl = island.Island(on_text=lambda t: typed.put(t), on_control=spotify_control, on_tap=island_tap)
+
+    def on_escape(event):
+        if event.keyCode() == 53:  # Esc: put the island away
+            esc_q.put(1)
+    esc_q = queue.Queue()
+    from AppKit import NSEvent as _NSEv
+    esc_monitor = _NSEv.addGlobalMonitorForEventsMatchingMask_handler_(1 << 10, on_escape)  # (key down)
+    SAVE_CLIPS[0] = labels.enabled = settings.get("save_clips", True)
+    gazer.learn_clicks = settings.get("gaze_clicks", True)
     clicks_q = queue.Queue()  # your clicks, for gaze to learn from (gaze.add_click)
 
     def on_click(event):
@@ -796,11 +866,16 @@ def run_live(args):
         line = notify.describe(b)
         ui["notifs"] = [n for n in ui["notifs"] if now - n["at"] < 180][-2:] + [{**b, "at": now, "line": line}]
         print(f"[notification] {line}", flush=True)
-        if not ui["open"]:
+        if not ui["open"] and not ui["ambient"]:  # (the island shows them with the camera off too)
             return
         at = len(conversation) - 2 if turn is not None and turn.get("shown") else len(conversation)
         conversation.insert(max(0, at), ("Notification", line))  # (the reply streaming in stays last)
-        if speaker.enabled and not b["private"] and turn is None and cap is None and not speaker.active:
+        pres.poke(now, 6)
+        if settings.get("nudges", False) and not b["private"] and b.get("body"):  # (off by default)
+            conversation.insert(max(0, at + 1), ("Notification", "Reply? Mouth or say “reply …”"))
+            pres.poke(now, 10)
+        if speaker.enabled and headphones() and not b["private"] and turn is None and cap is None \
+                and not speaker.active:
             speaker.begin_reply()
             speaker.say(line.replace(" / ", ", ", 1))
 
@@ -856,6 +931,35 @@ def run_live(args):
              "restore_voice": False}  # "Hey Claude" conversations
     ui["voice_pref"] = speaker.enabled  # VOICE in the menu: speak replies to mouthed / typed requests
     turn, last_turn, memory_sent = None, None, None
+    recent_file = DATA / "recent.json"  # the last few exchanges, so a restart doesn't wipe the conversation
+    resume = {"pending": True}
+
+    def remember_exchange(said, reply):
+        if not settings.get("remember", True):
+            return
+        try:
+            items = json.loads(recent_file.read_text()) if recent_file.exists() else []
+        except (OSError, ValueError):
+            items = []
+        items = (items + [{"at": time.time(), "you": (said or "")[:200], "claude": " ".join((reply or "").split())[:300]}])[-8:]
+        try:
+            recent_file.write_text(json.dumps(items))
+        except OSError:
+            pass
+
+    def resume_note():
+        """For the first message to a new Claude session: what you two were just talking about (last 2 hours)."""
+        if not settings.get("remember", True):
+            return None
+        try:
+            items = [i for i in json.loads(recent_file.read_text()) if time.time() - i["at"] < 7200]
+        except (OSError, ValueError, KeyError):
+            return None
+        if not items:
+            return None
+        lines = "; ".join(f'you: "{i["you"]}" -> you replied: "{i["claude"][:160]}"' for i in items[-5:])
+        return ("(Silent chat restarted, so this is a new session. Your recent exchanges with the user, oldest first: "
+                + lines + ". Carry on from there if it's relevant.)")
     preroll, cap = collections.deque(), None
     smile_since, smile_deleted, smiling, gesture = None, 0, False, False
     eyes_open_at, closed_since, blink_fired, last_smile = 0.0, None, False, -10.0
@@ -966,7 +1070,9 @@ def run_live(args):
                 "mic": ui["mic"], "wake": wake.enabled, "model": settings.get("model", args.model or "auto"),
                 "handsfree": ui["handsfree"], "screen": ui["screen"], "notify": ui["notify"], "lens": ui["lens"],
                 "ambient": ui["ambient"], "gaze": ui["gaze"], "warp": ui["warp"],
-                "improve": improve.load().get("enabled", True)}
+                "improve": improve.load().get("enabled", True), "clips": SAVE_CLIPS[0],
+                "remember": settings.get("remember", True), "clicks": gazer.learn_clicks,
+                "nudges": settings.get("nudges", False)}
     menu = StatusMenu(typed.put, settings_state, args.toggle_key)
     import settings_window
 
@@ -1241,8 +1347,10 @@ def run_live(args):
         audio = mic.segment(items[0][0] - 0.15, items[-1][0] + 0.15) if mic.on and ui["mic"] else None
         vocab = sorted(memory.data["vocabulary"], key=lambda w: -memory.data["vocabulary"][w])[:40]
         cands = None if ui["type"] or args.no_local else closed_set_candidates
+        sw = set(re.findall(r"[A-Z][a-z]{2,}|[a-z]{4,}", (screen.get("last") or "")))  # names, labels in front
+        sw |= {w for w in vocab if len(w) >= 3}
         job = lip_pool.submit(lipread, reader, [f for _, f in items], [t for t, _ in items], clip, io_pool,
-                              audio, transcriber["model"], vocab, cands)
+                              audio, transcriber["model"], vocab, cands, sorted(sw)[:120])
         lip_jobs.append((job, ("auto:" if mode == "auto" else "") + ("type" if ui["type"] else "chat")))
         if not ui["type"]:
             screen_soon(gazer.point(items[0][0] - 1.0, items[-1][0] + 0.2))  # (from just before they started)
@@ -1464,6 +1572,8 @@ def run_live(args):
         if t["reply"].strip().endswith("?"):
             ui["question_at"] = time.monotonic()  # a nod / head shake can answer it for the next 25 s
         heard, fix = t["heard"] or "", t["fix"]
+        remember_exchange(heard or " / ".join((p.get("typed") or p.get("spoken") or "") for p in t["parts"]),
+                          t["reply"])
         if fix:
             apply_fix(fix, tell_claude=False)
         elif last_turn and not last_turn.get("fixed"):
@@ -1831,6 +1941,70 @@ def run_live(args):
                     print(f"[island] shown {isl.shown} size {isl.w:.0f}x{isl.h:.0f} goal {isl.goal} field hidden "
                           f"{isl.field.isHidden()} frame {isl.field.frame()} state {isl.state} hover {amb.get('hover')}",
                           flush=True)
+                elif cmd == "/power":  # measure its own CPU and energy impact for 20 s, as it is right now
+                    def measure(state=("camera on" if ui["open"] and cam.cap is not None else "camera off")):
+                        pid = os.getpid()
+                        out = subprocess.run(["top", "-l", "11", "-s", "2", "-pid", str(pid), "-stats", "pid,cpu,power"],
+                                             capture_output=True, text=True).stdout
+                        rows = [l.split() for l in out.splitlines() if l.split()[:1] == [str(pid)]][1:]
+                        if rows:
+                            cpu = sum(float(r[1]) for r in rows) / len(rows)
+                            pw = sum(float(r[2]) for r in rows) / len(rows)
+                            amb["np_note"] = (f"Power ({state}): CPU {cpu:.0f}% of one core, energy impact {pw:.0f} "
+                                              "(Activity Monitor's scale)")
+                            print("[power] " + amb["np_note"], flush=True)
+                    threading.Thread(target=measure, daemon=True).start()
+                    notice = "Measuring power use for 20 s ..."
+                elif cmd == "/nudges" and rest.strip() in ("on", "off"):
+                    save_setting("nudges", rest.strip() == "on")
+                    notice = f"Reply suggestions {rest.strip()}."
+                elif cmd == "/privacy" and len(rest.split()) == 2 and rest.split()[1] in ("on", "off"):
+                    what, flag = rest.split()[0], rest.split()[1] == "on"
+                    if what in ("clips", "remember", "clicks"):
+                        save_setting({"clips": "save_clips", "remember": "remember", "clicks": "gaze_clicks"}[what], flag)
+                        if what == "clips":
+                            SAVE_CLIPS[0] = flag
+                            labels.enabled = flag
+                        elif what == "remember" and not flag:
+                            recent_file.unlink(missing_ok=True)  # (and forget what was kept)
+                        elif what == "clicks":
+                            gazer.learn_clicks = flag
+                        notice = {"clips": "Saving mouth clips for training", "remember": "Remembering the conversation "
+                                  "across restarts", "clicks": "Learning gaze from your clicks"}[what] + \
+                            (" on." if flag else " off.")
+                elif cmd == "/stats":
+                    import stats
+                    text = stats.summary()
+                    print("[stats] " + text.replace("\n", " | "), flush=True)
+                    if rest.strip() == "window":
+                        from AppKit import NSAlert, NSApp
+                        al = NSAlert.alloc().init()
+                        al.setMessageText_("How Silent Chat is doing")
+                        al.setInformativeText_(text.split("\n", 1)[1] if "\n" in text else text)
+                        NSApp.activateIgnoringOtherApps_(True)
+                        al.runModal()
+                elif cmd == "/practice":  # ~2 min: mouth 20 short phrases it shows you; each clip is labelled
+                    if not SAVE_CLIPS[0]:
+                        notice = "Practice needs Save mouth clips on (Settings)."
+                    elif not ui["open"]:
+                        notice = f"Turn the camera on first ({key_label})."
+                    else:
+                        import random as _r
+                        fixed = list(local_commands.FIXED)
+                        names = sorted(memory.data["vocabulary"], key=lambda w: -memory.data["vocabulary"][w])[:8]
+                        everyday = ["open my messages", "what's on my calendar today", "reply sounds good",
+                                    "play some music", "search for the weather tomorrow", "close this tab",
+                                    "remind me to call mom", "read that again", "turn it down", "go back"]
+                        pool = _r.sample(fixed, min(7, len(fixed))) + _r.sample(everyday, 8) + \
+                            [f"message {n.lower()}" for n in names[:5]]
+                        _r.shuffle(pool)
+                        ui["practice"] = {"phrases": pool[:20], "i": 0, "right": 0}
+                        conversation.clear()
+                        conversation.append(("Notification", "Practice: hold Option (or blink long) and mouth each "
+                                             "phrase. Esc stops."))
+                        conversation.append(("Claude", f"1/{len(ui['practice']['phrases'])}  Mouth: "
+                                                       f"“{ui['practice']['phrases'][0]}”"))
+                        pres.poke(time.monotonic(), 30)
                 elif cmd in ("/settings", "/setup"):
                     open_window(cmd[1:])
                 elif cmd == "/ambient":
@@ -1945,6 +2119,29 @@ def run_live(args):
                 job, mode = lip_jobs.pop(0)
                 if not lip_jobs:
                     trim_gpu()
+                if ui.get("practice") and not mode.startswith("auto:"):  # practice: label it, show the next one
+                    try:
+                        result = job.result()
+                    except Exception:
+                        result = None
+                    pr = ui["practice"]
+                    phrase = pr["phrases"][pr["i"]]
+                    if result and result.get("clip"):
+                        labels.add(result["clip"], phrase, "confirmed", "practice", result["hyps"])
+                        got = result["hyps"][0][0] if result["hyps"] else "?"
+                        right = got.lower().strip(" .") == phrase.lower().strip(" .")
+                        pr["right"] += right
+                        conversation.append(("Notification", f"{'✓' if right else '•'} it read: {got.lower()}"))
+                    pr["i"] += 1
+                    if pr["i"] >= len(pr["phrases"]):
+                        conversation.append(("Notification", f"Practice done: {pr['right']} of {len(pr['phrases'])} "
+                                             "read exactly right. Those clips now train your lip-reader."))
+                        ui["practice"] = None
+                    else:
+                        conversation.append(("Claude", f"{pr['i'] + 1}/{len(pr['phrases'])}  Mouth: "
+                                                       f"“{pr['phrases'][pr['i']]}”"))
+                    pres.poke(now, 30)
+                    continue
                 try:
                     result = job.result()
                     notice = ""
@@ -2006,6 +2203,9 @@ def run_live(args):
                     if mode == "hold":
                         subprocess.Popen(["afplay", "-v", "0.4", "/System/Library/Sounds/Funk.aiff"])
 
+            if amb.get("np_note"):  # (a background measurement finished)
+                conversation.append(("Notification", amb.pop("np_note")))
+                pres.poke(now, 8)
             # ---- the local model's decisions on hands-free reads
             while not routed.empty():
                 result, d = routed.get()
@@ -2075,6 +2275,11 @@ def run_live(args):
                 mem = memory.prompt_block()
                 screen_block, screen_full = screen_now()
                 notes += notifications_note(time.monotonic())
+                if resume["pending"]:
+                    resume["pending"] = False
+                    rn = resume_note()
+                    if rn:
+                        notes.append(rn)
                 hands_free_turn = any(p.get("handsfree") for p in pending)
                 if hands_free_turn:
                     notes.append("(This came from HANDS-FREE lip-reading, which also catches the user talking to "
@@ -2150,6 +2355,14 @@ def run_live(args):
                     turn = None
                 elif ev[0] == "done" and turn is not None:
                     log_usage(turn, ev)
+                    try:  # (stats.py: speed)
+                        with open(DATA / "metrics.jsonl", "a") as fh:
+                            fh.write(json.dumps({"at": f"{datetime.now():%Y-%m-%d %H:%M:%S}", "first_ms":
+                                                 round(turn.get("first", 0) * 1000), "voice": any(
+                                                     p.get("voice") for p in turn["parts"]), "mouthed": any(
+                                                     p.get("hyps") for p in turn["parts"])}) + "\n")
+                    except OSError:
+                        pass
                     improve.log("message", said=turn.get("heard") or " / ".join(
                         (p.get("typed") or p.get("spoken") or "")[:200] for p in turn["parts"]),
                         app=turn.get("app"), looking=turn.get("looking"), did=(turn.get("cmds") or [])[:12],
@@ -2164,6 +2377,7 @@ def run_live(args):
                     if turn is not None:
                         pending, turn = turn["parts"] + pending, None
                     memory_sent = None
+                    resume["pending"] = True  # (a new Claude session: give it the recent exchanges)
             speaker.update()
             if speaker.active:
                 voice["quiet_since"] = now
@@ -2374,7 +2588,15 @@ def run_live(args):
                 else:
                     amb["hover_in"] = None
                     amb["hover_out"] = amb.get("hover_out") or now
-                if amb.get("hover_in") and now - amb["hover_in"] > 0.15:
+                while not esc_q.empty():  # Esc: dismiss now (and forget the hover / history state)
+                    esc_q.get()
+                    pres.show_until, amb["hover"], amb["history_open"] = 0.0, False, False
+                    if ui.get("practice"):
+                        ui["practice"] = None
+                        conversation.append(("Notification", "Practice stopped."))
+                    amb["dismissed_at"], isl.max_text = now, 220.0
+                    isl.unfocus()
+                if amb.get("hover_in") and now - amb["hover_in"] > 0.15 and now - amb.get("dismissed_at", 0) > 1.0:
                     amb["hover"] = True  # (the text box takes the keyboard only when you click it, never by itself)
                 elif amb.get("hover") and amb.get("hover_out") and now - amb["hover_out"] > 0.6 and not isl.has_text():
                     amb["hover"] = False
@@ -2382,7 +2604,8 @@ def run_live(args):
                 on_panel = gp is not None and ix - 30 <= gp[0] <= ix + iw + 30 and gp[1] <= iy + ih + 40
                 struck_live = bool(amb.get("struck")) and now - amb["struck"][1] < 1.6
                 deciding = bool(amb.get("deciding")) and now - amb["deciding"][1] < 5
-                vis = pres.visible(now, busy or ind is not None or struck_live or deciding, ui["pinned"] or amb.get("hover", False),
+                vis = pres.visible(now, busy or ind is not None or struck_live or deciding,
+                                   ui["pinned"] or amb.get("hover", False) or amb.get("history_open", False),
                                    on_panel)
                 if amb.get("struck") and not struck_live and not busy:
                     amb["struck"] = None
@@ -2391,8 +2614,9 @@ def run_live(args):
                 want_field = ui["pinned"] or amb.get("hover", False) or (vis and ((amb["noface_since"] is not None and now - amb["noface_since"] > 1.5)
                                                        or now - amb["read_failed"] < 20
                                                        or (not ui["mic"] and not wake.enabled)))
-                lines = [(w, t) for w, t in (amb.get("history", []) + conversation if amb.get("hover") else
-                                             conversation)[-6 if amb.get("hover") else -3:] if t and t != "..."]
+                open_up = amb.get("hover") or amb.get("history_open")
+                lines = [(w, t) for w, t in (amb.get("history", []) + conversation if open_up else conversation)
+                         [-(12 if amb.get("history_open") else 6 if open_up else 3):] if t and t != "..."]
                 if turn is not None and turn.get("handsfree"):  # (until Claude decides it's for it)
                     lines = [x for x in lines if x[0] != "Claude"]
                 if amb.get("deciding") and now - amb["deciding"][1] < 5:  # (the local model is deciding)
@@ -2409,7 +2633,28 @@ def run_live(args):
                     amb["playing_until"] = max(amb.get("playing_until", 0), now + 1.5) if on_panel else amb["playing_until"]
                 # compact (just the live activity) while you talk; it opens up when there's something to read
                 show_lines = lines if (ind not in ("mouth", "voice", "listen") or amb.get("hover")) else []
-                isl.update(ind=ind, amp=amp, lines=show_lines, playing=playing, field=want_field and vis, visible=vis)
+                while not vote_q.empty():  # thumbs up / down on the last reply
+                    v = vote_q.get()
+                    if amb.get("vote_for"):
+                        amb["voted"] = v
+                        rec = {"at": f"{datetime.now():%Y-%m-%d %H:%M:%S}", "vote": v, **amb["vote_for"]}
+                        try:
+                            with open(DATA / "feedback.jsonl", "a") as fh:
+                                fh.write(json.dumps(rec) + "\n")
+                        except OSError:
+                            pass
+                        improve.log("vote", said=rec.get("said"), reply=rec.get("reply"), ok="yes" if v == "up" else "no")
+                        pres.poke(now, 1.5)
+                last_reply = next((t for w, t in reversed(show_lines) if w == "Claude" and t and t != "..."), None)
+                if last_reply and turn is None and not amb.get("struck"):
+                    said = next((t for w, t in reversed(show_lines) if w in ("You", "Typed")), "")
+                    if (amb.get("vote_for") or {}).get("reply") != last_reply:
+                        amb["vote_for"], amb["voted"] = {"said": said, "reply": last_reply}, ""
+                    votable = amb.get("voted", "")
+                else:
+                    votable = None
+                isl.update(ind=ind, amp=amp, lines=show_lines, playing=playing, field=want_field and vis, visible=vis,
+                           votable=votable if not playing else None)
                 if ui.get("focus_field") and not isl.field.isHidden():  # (once it has opened)
                     ui["focus_field"] = False
                     isl.focus_field()

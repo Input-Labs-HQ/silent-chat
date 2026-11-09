@@ -113,9 +113,10 @@ def _symbol(name, size=13, color=None):
 
 
 class Island:
-    def __init__(self, on_text=None, on_control=None):
+    def __init__(self, on_text=None, on_control=None, on_tap=None):
         from overlay import KeyPanel
-        self.on_text, self.on_control = on_text, on_control
+        self.on_text, self.on_control, self.on_tap = on_text, on_control, on_tap
+        self.max_text = 220.0  # (taller when you click it open for more history)
         self.screen, (self.nx0, self.nx1), self.nh = notch()
         self.w, self.h, self.vw, self.vh = self.nx1 - self.nx0, self.nh, 0.0, 0.0
         self.goal = (self.w, self.h)
@@ -166,11 +167,11 @@ class Island:
             h += s.boundingRectWithSize_options_((width, 2000), 1 << 0).size.height + 6  # (uses line fragment origin)
         return h
 
-    def update(self, ind=None, amp=0.0, lines=(), playing=None, field=False, visible=True):
+    def update(self, ind=None, amp=0.0, lines=(), playing=None, field=False, visible=True, votable=None):
         """Every frame. ind: the live activity (or None). lines: [(who, text)] to show (the last exchange).
         playing: {'title', 'artist', 'state', 'art'} for the now-playing card, or None. field: show the text box."""
-        lines = [tuple(x) for x in lines if x[1]][-4:]  # (who, text) or (who, text, struck_at)
-        self.state.update(ind=ind, amp=amp, lines=lines, playing=playing, field=field)
+        lines = [tuple(x) for x in lines if x[1]][-(12 if self.max_text > 220 else 4):]  # (who, text[, struck_at])
+        self.state.update(ind=ind, amp=amp, lines=lines, playing=playing, field=field, votable=votable)
         wants = visible and (ind is not None or lines or playing or field)
         if wants and not self.shown and abs(self.w - (self.nx1 - self.nx0)) < 1:
             # about to appear: on the screen you're using now (its notch, or the top of another display)
@@ -186,9 +187,11 @@ class Island:
             if playing:
                 h += ART + 14
             if lines:
-                h += min(220.0, self._text_height(lines, EXP_W - 2 * PAD)) + 8
+                h += min(self.max_text, self._text_height(lines, EXP_W - 2 * PAD)) + 8
             if field:
                 h += FIELD_H + 6
+            if votable:
+                h += 18
             goal = (EXP_W, h + 10)
         self.goal = goal
         if playing and playing.get("art") and playing["art"] != self.art_url:
@@ -320,6 +323,25 @@ class Island:
             if struck is not None:  # a misread / not for Claude: a line draws through it, left to right
                 self._strike(text, y, w, th, max(0.0, min(1.0, (t - struck) / 0.35)), alpha)
             y += th + 6
+        self._votes(w, h, alpha)
+
+    def _votes(self, w, h, alpha):
+        """Thumbs up / down under a reply (votable: None, or the vote already given: '', 'up', 'down')."""
+        self.votes = {}
+        v = self.state.get("votable")
+        if v is None:
+            return
+        y = h - (FIELD_H + 8 if self.state["field"] else 0) - 26
+        for i, (name, sym) in enumerate((("up", "hand.thumbsup"), ("down", "hand.thumbsdown"))):
+            chosen = v == name
+            img = _symbol(sym + (".fill" if chosen else ""), 11, _white((0.9 if chosen else 0.38) * alpha))
+            x = w - PAD - 46 + i * 26
+            if img is not None:
+                sz = img.size()
+                img.drawInRect_fromRect_operation_fraction_respectFlipped_hints_(
+                    NSMakeRect(x + 10 - sz.width / 2, y + 9 - sz.height / 2, sz.width, sz.height),
+                    NSMakeRect(0, 0, 0, 0), 2, alpha, True, None)
+            self.votes[name] = (x - 2, y - 4, x + 22, y + 22)
 
     def _strike(self, text, y, w, th, progress, alpha):
         """Strike through each wrapped line of text, the line growing with progress (0..1)."""
@@ -404,6 +426,12 @@ class Island:
             if x0 <= x <= x1 and y0 <= y <= y1 and self.on_control:
                 self.on_control(name)
                 return
+        for name, (x0, y0, x1, y1) in getattr(self, "votes", {}).items():
+            if x0 <= x <= x1 and y0 <= y <= y1 and self.on_tap:
+                self.on_tap(name)
+                return
+        if self.on_tap:
+            self.on_tap("island")
 
     def close(self):
         self.panel.orderOut_(None)

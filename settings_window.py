@@ -67,13 +67,21 @@ SWITCHES = [
      "/lens warp off"),
     ("notify", "Notifications", "Show new notifications and let Claude reply (it asks first).", "/notify on",
      "/notify off"),
+    ("nudges", "Suggest replies", "When a message notification arrives, offer to reply (off by default).",
+     "/nudges on", "/nudges off"),
     ("improve", "Build its own features", "Learn shortcuts and tips from how you use it, once a day.",
      "/improve on", "/improve off"),
     ("face", "Face gestures", "Long blink to listen, smile to delete, eyebrows for Enter.", None, None),
+    ("clips", "Save mouth clips for training", "Keep clips of your mouth on this Mac to improve the lip-reader.",
+     "/privacy clips on", "/privacy clips off"),
+    ("remember", "Remember across restarts", "Keep your last few exchanges on this Mac so a restart keeps context.",
+     "/privacy remember on", "/privacy remember off"),
+    ("clicks", "Learn gaze from clicks", "Use where you click to keep eye tracking accurate.",
+     "/privacy clicks on", "/privacy clicks off"),
 ]
 MODELS = [("auto", "Auto: Haiku, Opus when needed"), ("haiku", "Haiku (cheapest)"), ("opus", "Opus (smartest)")]
-BUTTONS = [("Calibrate Gaze…", "/gaze calibrate"), ("Show Where I'm Looking", "/gaze show 20"),
-           ("Improve Now", "/improve"), ("Setup…", "/setup")]
+BUTTONS = [("Practice (2 min)", "/practice"), ("Calibrate Gaze…", "/gaze calibrate"), ("Show Where I'm Looking", "/gaze show 20"),
+           ("Improve Now", "/improve"), ("Show Stats", "/stats window"), ("Setup…", "/setup")]
 
 
 class SettingsWindow:

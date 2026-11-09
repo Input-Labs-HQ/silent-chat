@@ -50,7 +50,7 @@ def is_common(word):
 class Labels:
     def __init__(self, path=None):
         self.path = Path(path) if path else DATA / "labels.csv"
-        self.rows = []
+        self.rows, self.enabled = [], True  # (enabled False: nothing new is recorded; Settings "Save mouth clips")
         if self.path.exists():
             with open(self.path, newline="") as f:
                 self.rows = list(csv.DictReader(f))
@@ -71,6 +71,8 @@ class Labels:
         os.replace(tmp, self.path)
 
     def add(self, clip, text, status, source, hyps, options=None):
+        if not self.enabled:
+            return
         self.rows.append({
             "time": f"{datetime.now():%Y-%m-%d %H:%M:%S}", "clip": str(Path(clip).relative_to(ROOT)), "text": text,
             "status": status, "source": source, "lipreader_top1": hyps[0][0] if hyps else "",

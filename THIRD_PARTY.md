@@ -8,6 +8,9 @@ None of these are included in this repository; `setup.command` downloads them.
 | Lip-reading weights `vsr_trlrs2lrs3vox2avsp_base.pth` | Auto-AVSR authors | Trained on LRS2, LRS3, VoxCeleb2 and AVSpeech, which are licensed for **research and non-commercial use**. Treat the model as research-only. |
 | Face detector (BlazeFace) and Face Landmarker models | [Google MediaPipe](https://ai.google.dev/edge/mediapipe) | Apache-2.0 |
 | Whisper large-v3-turbo (MLX conversion) | OpenAI Whisper, via [mlx-community](https://huggingface.co/mlx-community/whisper-large-v3-turbo) and mlx-whisper | MIT. Downloaded on first use of the microphone. |
+| Whisper base.en (MLX conversion) | OpenAI Whisper, via [mlx-community](https://huggingface.co/mlx-community/whisper-base.en-mlx) | MIT. The "Hey Claude" check. |
+| Silero VAD | [snakers4/silero-vad](https://github.com/snakers4/silero-vad) | MIT. Tells speech from music and noise. |
+| Qwen3 1.7B (4-bit MLX conversion) | Alibaba Qwen, via [mlx-community](https://huggingface.co/mlx-community/Qwen3-1.7B-4bit) and mlx-lm | Apache-2.0. The local model for hands-free and the privacy check; downloaded on first use. |
 | Python packages | `requirements.txt` | Each under its own license. |
 
 Claude is used through your own Claude Code installation and account, under Anthropic's terms.

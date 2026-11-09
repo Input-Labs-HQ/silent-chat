@@ -429,7 +429,7 @@ class Gaze:
         self.lens, self.lens_on, self.warp_on = None, False, False  # the glass circle that follows your gaze
         # free calibration from your clicks: you look at what you click, so each click is a labelled example
         self.feat_hist = collections.deque(maxlen=60)  # (t, features) for the last ~2 s
-        self.clicks, self.refit_at, self.click_note = [], 0, None
+        self.clicks, self.refit_at, self.click_note, self.learn_clicks = [], 0, None, True
         try:
             z = np.load(CLICKS)
             self.clicks = [(f, float(x), float(y)) for f, (x, y) in zip(z["X"], z["Y"])]
@@ -489,7 +489,7 @@ class Gaze:
         calibration example, if it was on the calibrated screen and roughly where gaze said you were looking (a
         blind click, e.g. while reading something else, is skipped). Every 10 new clicks it refits and keeps the
         new model only if it's more accurate on clicks it didn't train on. -> a note when it improved, else None."""
-        if self.model is None or self.calib is not None:
+        if self.model is None or self.calib is not None or not self.learn_clicks:
             return None
         q = self.info.get("screen")
         if not q or not (q[0] <= x <= q[0] + q[2] and q[1] <= y <= q[1] + q[3]):
