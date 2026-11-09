@@ -22,7 +22,8 @@
 <p align="center">
   <img src="docs/demo.gif" width="760" alt="Demo: while a video plays, lips silently mouth “play Drake on Spotify”; the notch widens with a wave that follows the lips, shows working dots, then drops down with God's Plan by Drake now playing, without leaving the video">
 </p>
-<p align="center"><sub>Illustrated demo: the island is the real app's, rendered frame by frame; the lips are animated.</sub></p>
+<p align="center"><sub>Illustrated demo: the island is the real app's, rendered frame by frame; the lips are animated. Album
+artwork © its owners, shown as Spotify displays it.</sub></p>
 
 ## What it does
 
@@ -47,7 +48,7 @@
 | 🪶 **Light** | About 2 GB when idle: big models load only when needed, and the camera turns off when you walk away. |
 
 <p align="center">
-  <img src="docs/island-states.png" width="860" alt="Six island states: listening with a wave that follows your lips, working dots, now playing with controls, a misread struck through, a reply, and the hover-to-type box">
+  <img src="docs/island-states.png" width="860" alt="Six island states: listening with a wave that follows your lips, working dots, now playing (SICKO MODE by Travis Scott) with controls, a misread struck through, a reply, and the hover-to-type box">
 </p>
 
 ## How it works
