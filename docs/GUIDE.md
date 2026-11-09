@@ -7,8 +7,9 @@ Everything in detail: every feature and setting, how it works, and the lip-readi
 
 The goal is to talk to Claude with mouth movements only. It runs as a **menu bar app, "Silent Chat"**
 (`~/Applications/Silent Chat.app`), and **opens at login**, so you can tap `\` anytime.
-* **Menu bar icon** (a mouth, filled while the overlay shows): Show/Hide, the TYPE / VOICE / FACE / MIC switches,
-  Open at Login, Open Console, Restart and Quit.
+* **Menu bar icon** (a mouth, filled while the overlay shows): Show/Hide, the TYPE / VOICE / FACE / MIC /
+  HEY CLAUDE / HANDS-FREE / SCREEN / NOTIFICATIONS switches, the model, Open at Login, Open Console, Restart and
+  Quit.
 * **Open Console** (or double-click `silent_chat.command`) opens a Terminal window with the live log, where you can
   type a message or a command (`/fix`, `/learn`, `/status`, `/restart`, `/quit` …). Closing it doesn't stop silent
   chat. Commands reach it through a pipe (`data/silent_chat/commands.fifo`).
@@ -53,6 +54,22 @@ then Restart). Only the tools voice control needs are loaded, which keeps replie
   fresh Spotify sign-in, so it isn't used.)
 * `--no-connectors` turns this off.
 
+**Saving your Claude usage.** Requests take the cheapest route that works:
+
+1. **No model at all** for everyday commands: volume ("turn it down to 20"), play/pause/next, "open Chrome",
+   typing mode, voice/mic/face on/off, hide, scroll, and new/close tab and back in a browser. They run instantly on
+   the Mac (`local_commands.py`). A mouthed command only counts if the lip-reader's top guess matches, or its top
+   two agree; otherwise it goes to Claude. `--no-local` turns this off.
+2. **Haiku first** for everything else. It handles chat, quick questions and simple actions. For hard requests
+   (more than about five steps, longer writing, research, maths, code, or "think harder") it hands the message to
+   **Opus**, with the recent conversation. The hand-off is never shown or spoken; the overlay says "Thinking
+   harder (Opus)".
+3. **Dictation clean-up** (TYPE mode and mouthed Option dictation) always uses Haiku. Speaking out loud while
+   holding Option uses no model at all: Whisper's text is typed directly.
+
+Choose the model from the menu bar (Model: Auto / Haiku / Opus), with `/model auto|haiku|sonnet|opus` in the
+console, or with `--model`. The choice is remembered.
+
 **Just ask Claude to change modes.** "Turn on typing mode", "stop talking out loud", "turn the mic on", "face
 gestures off", "hide". Claude switches the setting and confirms. This works in TYPE mode too: mouthing "turn off
 typing mode" switches back to chat instead of typing those words. Claude is told the current settings with every
@@ -92,6 +109,169 @@ Discord notifications", "put Todoist and Calendar side by side" or multi-step jo
   macOS asks the first time.
 * **Testing from the console**: `/macctl <command>` runs macctl with Silent Chat's permissions and prints the
   result to the log. `ui <App> --stats` shows only sizes and counts, no content.
+
+**Claude sees what's in front (screen summary).** Every message carries a short summary of the front window: the
+app and window title, the focused field and what's in it, any selected text, the page address (without its query
+string), and the main buttons, fields, tabs and links by name. So "what is this?", "summarise this" and "press
+Send" need no extra look first.
+* It's built while the lip-reader is still working (about 0.1 s), so it adds no delay. If the screen hasn't changed
+  since your last message, only "(Screen: unchanged)" is sent.
+* Size: at most about 290 tokens; about 180–260 for busy windows (Discord, Chrome, Todoist, Claude) and about 10 for
+  a window with nothing readable. Password fields are never included.
+* Measured with `eval_context.py` (the same questions with and without it, Haiku, fresh sessions). For questions
+  about the screen it cut model calls from 1.8 to 1.0 per message, tool calls from 0.8 to 0, total input tokens by
+  48% and time from 5.6 s to 3.0 s. For messages that have nothing to do with the screen it costs about 300 input
+  tokens and no time.
+* Turn it off with **SCREEN** in the menu bar or `/screen off`. `macctl context [App]` prints exactly what's sent.
+
+**Instant on-screen commands (no model).** When you mouth something short, the lip-reader also scores it against
+what you could do right now: the fixed commands, your running apps, the front window's buttons and links ("press
+Compose"), and your saved shortcuts. Picking from a list of about 40 is far easier than reading free text, so a
+clear match runs at once, with no Claude round trip (2–4 s saved).
+* Measured on 29 command-length clips the personal model never trained on: free reading got 17% exactly right;
+  picking from 40 options got 76%. With the cautious threshold used live (`CLOSED_MARGIN 2`), 41% run instantly
+  and correctly, 3% run the wrong thing, and the rest go to Claude as usual. When you mouth something that isn't in
+  the list, 3% are wrongly accepted. Scoring takes about 0.1–0.2 s.
+* Risky commands (send, delete, buy, quit …) are never instant.
+* Every attempt, accepted or not, is logged to `data/silent_chat/commands.log`.
+
+**Saved shortcuts.** When Claude finishes a task you're likely to repeat, it saves the steps as a shortcut with
+blanks for the parts that change ("open my DMs with {name}"). Next time, saying that phrase replays the steps
+directly on the Mac, with no model, in about a second. If a replay fails, Claude takes over and fixes the shortcut.
+* A step that sends, posts, deletes or buys is saved as `ask:` and still asks you first on every replay.
+* Past values become instant-command options too ("open my DMs with Alex").
+* Ask Claude to list, rename or delete them, or use `macctl shortcuts`, `forget <n>`, `rename <n> <phrase>`. They're
+  stored in `data/silent_chat/shortcuts.json`.
+
+**It builds its own features from how you use it.** Every message, shortcut and instant command is logged in one
+short line: what you asked, the app in front, what you were looking at, what Claude did on the Mac and whether it
+worked (`data/silent_chat/activity.jsonl`). Once a day, after 10 idle minutes, Haiku reads the last week of that
+and may:
+* **add a shortcut** for a task you keep asking for the same way, built from steps that worked;
+* **add a tip**, one sentence Claude is told whenever that app is in front ("Keep Discord on the MacBook screen"),
+  learned from your corrections and repeats;
+* **tweak** one of its features that failed or that you corrected, or **delete** one that's wrong.
+
+New features switch on immediately, with no restart: shortcuts and tips are read fresh for every message. A one-line
+"Learned: …" note shows in the overlay. **Anything it built that you haven't used for 7 days is removed quietly**
+(saved in `learned_removed.jsonl`, so nothing is lost). Shortcuts you or Claude saved by hand are never removed
+for being idle.
+* It only ever writes shortcuts, made of the same Mac steps Claude uses from a fixed list, and short text tips. It
+  never writes code. Any step that sends, posts, deletes or buys is forced to ask you first. It reads your own words
+  plus app names, window titles and button labels, never page text.
+* Measured cost: about 9k input and 1.3k output tokens per run (Haiku, once a day), about the same as two messages.
+* `/improve` runs it now, `/improve dry` shows what it would do without changing anything, `/improve list` shows
+  what it has built, and `/improve off` / `on` stops or restarts the daily run.
+
+**Nod to confirm, shake to cancel.** When Claude asks a yes/no question ("Send 'on my way' to Alex?"), nod for
+yes or shake your head for no, within 25 s.
+* **With AirPods in**, it uses their head-motion sensors (precise, works without looking at the camera) through a
+  tiny helper app, "Silent Chat Motion", which asks for Motion permission once. Otherwise it uses the camera's head
+  pose, which needs a bigger nod.
+* On simulated movements: AirPods caught every nod and shake with no false triggers; the camera caught every clear
+  nod but 83% of small ones, also with no false triggers. Head movements only count while a question is waiting.
+* `airpods_motion: false` in `data/silent_chat/settings.json` turns the AirPods part off.
+
+**Notifications.** New notifications appear in the overlay as they arrive and are read out when VOICE is on (only
+while the overlay is showing). Then say "reply …" and Claude drafts the reply in that app and asks before sending
+(nod to send).
+* They're read from the Notification Center banners through Accessibility (no extra permission); detected within
+  about a second.
+* Anything that looks like a code or password ("Your verification code is …") is never read out or passed on.
+* Claude only sees notifications from the last 3 minutes, and only with your next message.
+* Turn it off with **NOTIFICATIONS** in the menu bar or `/notify off`. `macctl notifications` lists what's showing.
+
+**It shows up only when you use it (auto-hide).** The panel stays out of sight until something happens: it hears
+you (long blink, Option, "Hey Claude"), it's thinking or answering, a notification arrives, or Claude asked you
+something. Then it fades in, stays long enough to read the reply (about 4 words a second, 4–25 s, longer while your
+eyes are on it), and fades out. The next time it starts fresh; Claude still remembers the conversation.
+* **It lives in the notch, like a Dynamic Island.** A black capsule grows out of the MacBook's notch, so it reads
+  as part of the screen, and springs between sizes:
+  * **compact** (the notch just widens) while something is happening: the live activity left of the notch, a small
+    symbol right of it. A little white wave moves with your lips, a blue wave as you speak, a soft dot while it
+    listens and you're still, three dots while it reads your lips (grey) or Claude works (amber), a green wave while
+    it speaks;
+  * **expanded** (it drops into a rounded card sized to the text) with the reply;
+  * **now playing** after you play or skip a song: album art, song, artist, and ⏮ ⏯ ⏭ you can click.
+  On a screen without a notch it hangs from the top centre the same way.
+* **Hover over the island (or the bare notch) to type.** The chat drops down with your recent conversation and a
+  text box. Click the box, type, and press Return. It closes when the mouse leaves, unless the box has text in it.
+  It never takes the keyboard by itself.
+* **\\ turns the camera on or off.** With the camera off, replies and notifications still show in the island.
+* Hiding silent chat from the menu still turns the camera off; replies and notifications still pop up and fade.
+* AUTO-HIDE in the menu bar, or `/ambient on|off`, switches it. Off, the panel stays up as before.
+
+**It talks only when that makes sense.**
+* **No headphones in:** it never speaks; replies are shown instead.
+* **Headphones in:** it answers out loud when you spoke out loud, or when you mouthed or typed with VOICE on.
+* **A video in front** (YouTube, Netflix, Twitch, a video player …): it stays quiet and just shows the result.
+* **Music:** while you talk to it out loud and while it answers, Spotify turns down to about a third of its volume,
+  and back up afterwards.
+* **Play / skip on Spotify:** a short card shows what's now playing, "♫ Song — Artist", then fades.
+* "Headphones in" means AirPods reporting head motion (they only do that in your ears), or other headphones as the
+  sound output.
+
+**Hands-free, without false alarms.** When it starts by itself (HANDS-FREE on), what it read shows in the island,
+and then:
+1. **A clear instant command or saved shortcut** ("pause", "next song", "open my DMs with Alex") runs at once.
+2. **Otherwise a free word check** drops chatter ("okay", "so I'm going to", "now"): the words are struck through
+   and the island retracts.
+3. **Anything that might be a request goes to a small model on your Mac** (Qwen3 1.7B, 4-bit, MLX: about 0.2–0.5 s,
+   nothing leaves the Mac, no plan usage). It fixes the misread words, then either:
+   * **ignores it** (struck through, retracts);
+   * **does it**, if it's simple and harmless: pause / play / skip / previous song, open an app, scroll, or a web
+     search you asked for;
+   * **hands it to Claude** with the fixed words ("please write up on Spotify" → "play rap on Spotify"). Claude can
+     still answer IGNORE, and then it's struck through.
+   Closing or pressing anything always goes to Claude, so a misread can't close your work.
+Each false start makes hands-free about 5% harder to set off, up to +60%, and each real use eases it back. Every
+decision is logged in `handsfree.log`. On past reads the local model used a median of ~0.4 s. The model is
+`mlx-community/Qwen3-1.7B-4bit` (1.8 GB on disk, in `~/.cache/huggingface`).
+
+**Spotify stays in the background.** Your claude.ai Spotify connector finds the playlist or song, and silent chat
+plays it through Spotify's scripting, so you don't leave what you're doing. If Spotify isn't running it's started
+hidden.
+
+**Claude knows where you're looking (gaze).** Whenever you talk, mouthed, out loud or typed, silent chat tells
+Claude roughly where your eyes were: the text under your gaze and the nearest buttons, links and fields. You don't
+aim with it. It's background awareness, so "what does this say?" or "is that right?" just work. Claude never presses
+anything because of where you looked; it acts only when you ask, and asks if it isn't clear which control you mean.
+* **The glass circle** (menu bar > GLASS CIRCLE, or `/lens`) is a barely-there soft glass edge that follows your
+  gaze while silent chat is showing, with a faint ripple each time your eyes land somewhere new. Under it the screen
+  bends very slightly, like looking through a drop of glass: a gentle bulge, strongest in the middle, fading to nothing
+  at the edge, and a touch stronger as it lands. It stays put while you read a line and glides over when your eyes
+  move on. The bend copies only the small patch under the circle, about 24 times a second, keeps nothing and sends
+  nothing; it needs Screen Recording permission (without it the circle is drawn but nothing bends). Measured: ~10 ms
+  per frame on a background thread, about 5% of one CPU core. `/lens warp off` keeps the circle without the bend. (macOS's own Liquid Glass material can't see other apps' windows, so it
+  frosts the text behind it into a grey disc; silent chat bends the screen patch itself instead.)
+* **Calibrate once** (menu bar > Calibrate Gaze…, or `/gaze calibrate`, with the overlay showing): put your mouse
+  on the screen you want, then look at each dot as it appears (about a minute). 20 dots teach it your eyes; then 9
+  *new* dots measure the real error, which it reports and saves. `/gaze` shows the measured error again.
+* How: the camera's view of each iris inside its eye, your eyelids (they follow vertical gaze), and your head's
+  direction and position. With AirPods in, their motion sensors steady the head direction: the camera gives the
+  absolute direction, the AirPods the precise fast movement (they learn each other's axes on the fly). In
+  simulation that cut head-direction error by 40–57%.
+* Be realistic: webcam eye tracking is typically off by 2–4 cm. GazeLink, the eye tracker plugin already on this
+  Mac, measured 198 pt (about 4 cm on the MacBook screen) in its own calibration. Silent chat, calibrated on
+  the MacBook screen with AirPods in, measured a typical error of 80 pt (1.6 cm) on 9 fresh dots, worst 155 pt
+  (3.1 cm), 6 of 9 within 100 pt: well under half GazeLink's error, but still a fingertip or two. (It ignores small
+  head shifts: an early version that didn't flung the point off screen when you leaned.) So it never clicks
+  exactly where it thinks you look. It snaps to the nearest control, which works when targets are a finger-width
+  or more apart. Close-packed small links need a name ("press Settings").
+* **Show Where I'm Looking** (menu bar, or `/gaze show`) draws a ring that follows your gaze for 20 s.
+* `/gaze where [n] [seconds]` is a dry run: every few seconds a tick logs what you're looking at and the nearest
+  controls, pressing nothing. Handy for checking it on a new app.
+* It works on the screen it was calibrated on; recalibrate if you move the laptop or your seat a lot. `/gaze off`
+  turns it off. Every calibration's results are kept in `data/silent_chat/gaze_eval.log`.
+
+**Hands-free start (measuring).** Start listening just by mouthing while you face the screen, with no key and no
+blink. For now it only **measures**: it logs when it *would* have started (`data/silent_chat/handsfree.log`) and
+`/handsfree` prints how often that matched you really starting. The first 38 minutes: 59 would-be starts while
+you weren't talking to it (mostly talking out loud or chewing), so it isn't ready to switch on. Switch it on anyway
+with **HANDS-FREE** in the menu bar or `/handsfree on` (`off`, or `shadow` to measure).
+
+**Checking usage.** `/usage` prints the tokens, model calls, tool calls and time per Claude message over the last
+24 hours, split by whether the screen summary was sent (from `data/silent_chat/usage.log`).
 
 **Show / hide anytime: tap `\`** in any app. Hidden means the overlay is gone, **the camera is off** (its light
 goes out) and nothing listens. The model and Claude stay loaded, so it comes back in about a second.
@@ -175,7 +355,8 @@ indistinguishable. What helps:
 * Spoken replies go to your **AirPods whenever they're connected to this Mac**, otherwise to the default output.
   The log prints which device it's using. `--audio Speakers` forces the built-in speakers.
 * In the console (menu bar > Open Console) you can also **type** a message, `/fix <what you actually said>`,
-  `/learn <word, word>`, `/voice`, `/face`, `/type`, `/mic`, `/hide`, `/show`, `/restart` or `/quit`.
+  `/learn <word, word>`, `/voice`, `/face`, `/type`, `/mic`, `/wake`, `/screen`, `/notify`, `/handsfree`,
+  `/usage`, `/model`, `/status`, `/hide`, `/show`, `/restart` or `/quit`.
 
 **Speed.** One `claude` process stays running for the whole chat, so there's no start-up per turn and it keeps the
 conversation context. It streams the reply, and speech starts as soon as the first sentence is complete. Claude runs

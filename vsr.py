@@ -13,6 +13,7 @@ import os
 import subprocess
 import sys
 import textwrap
+import re
 import time
 import warnings
 from datetime import datetime
@@ -46,6 +47,7 @@ def default_ckpt():
 DETECTOR_MODEL = ROOT / "models" / "blaze_face_short_range.tflite"
 LANDMARKER_MODEL = ROOT / "models" / "face_landmarker.task"  # lip landmarks + blendshapes
 UNITS_FILE = AVSR_DIR / "spm" / "unigram" / "unigram5000_units.txt"
+SPM_MODEL = AVSR_DIR / "spm" / "unigram" / "unigram5000.model"  # text -> the model's word pieces
 FPS = 25  # the model was trained on 25 fps video
 MAX_SIDE = 1280  # downscale bigger frames to save memory; the mouth crop is 96x96 anyway
 
@@ -382,6 +384,7 @@ class MouthActivity:
             running_mode=mp.tasks.vision.RunningMode.VIDEO,
             num_faces=1,
             output_face_blendshapes=True,
+            output_facial_transformation_matrixes=True,  # head pose
         )
         with _quiet_stderr():
             self.landmarker = mp.tasks.vision.FaceLandmarker.create_from_options(opts)
@@ -389,6 +392,8 @@ class MouthActivity:
         self.mouth = None  # (centre x, centre y, mouth width) in pixels, from the lip landmarks
         self.landmarks = None  # (478, 3) face landmarks in pixels (z scaled like x)
         self.blend = {}  # all 52 blendshape scores, e.g. mouthSmileLeft, jawOpen
+        self.pose = None  # head (yaw, pitch, roll) in degrees; (0, 0, 0) = facing the camera
+        self.matrix = None  # the 4x4 face transform (rotation + position), for gaze
 
     def __call__(self, frame_rgb, t):
         ms = max(int(t * 1000), self.last_ms + 1)  # VIDEO mode needs strictly increasing timestamps
@@ -396,13 +401,21 @@ class MouthActivity:
         result = self.landmarker.detect_for_video(
             mp.Image(image_format=mp.ImageFormat.SRGB, data=np.ascontiguousarray(frame_rgb)), ms)
         if not result.face_blendshapes:
-            self.prev, self.mouth, self.landmarks, self.blend = None, None, None, {}
+            self.prev, self.mouth, self.landmarks, self.blend, self.pose = None, None, None, {}, None
+            self.matrix = None
             return None
         h, w = frame_rgb.shape[:2]
         lips = np.array([[result.face_landmarks[0][i].x * w, result.face_landmarks[0][i].y * h] for i in LIP_POINTS])
         self.mouth = (*lips.mean(axis=0), float(np.ptp(lips[:, 0])))
         self.landmarks = np.array([[p.x * w, p.y * h, p.z * w] for p in result.face_landmarks[0]])
         self.blend = {c.category_name: c.score for c in result.face_blendshapes[0]}
+        self.matrix = None
+        if result.facial_transformation_matrixes:
+            self.matrix = np.asarray(result.facial_transformation_matrixes[0])  # head rotation + position (gaze)
+            r = self.matrix[:3, :3]
+            self.pose = (float(np.degrees(np.arctan2(r[0, 2], r[2, 2]))),  # yaw: turned left/right
+                         float(np.degrees(np.arcsin(np.clip(-r[1, 2], -1, 1)))),  # pitch: up/down
+                         float(np.degrees(np.arctan2(r[1, 0], r[1, 1]))))  # roll: tilted
         v = np.array([c.score for c in result.face_blendshapes[0] if c.category_name.startswith(("mouth", "jaw"))])
         change = 0.0 if self.prev is None else float(np.abs(v - self.prev).sum())
         self.prev = v
@@ -546,6 +559,66 @@ class LipReader:
             if len(ranked) == nbest:
                 break
         return list(ranked.items()), fallbacks
+
+    def encode(self, crops):
+        """Mouth crops -> encoder output (1, T, D), on the decoder's device. Shared by decode_enc() and score()."""
+        x = torch.from_numpy(crops).permute(0, 3, 1, 2).float() / 255.0
+        x = VIDEO_TRANSFORM(x).unsqueeze(0).to(self.device)
+        with torch.no_grad():
+            enc, _ = self.model.encoder(self.model.proj_encoder(self.model.frontend(x)), None)
+        return enc.to(self.search_device)
+
+    def decode_enc(self, enc, nbest=10):
+        """Open-vocabulary n-best from an encoder output: [(text, log_prob), ...]."""
+        with torch.no_grad():
+            hyps = self.beam_search(enc.squeeze(0))
+        ranked = {}
+        for h in hyps:
+            ranked.setdefault(self._hyp_text(h), float(h.score))
+            if len(ranked) == nbest:
+                break
+        return list(ranked.items())
+
+    def tokens(self, text):
+        if not hasattr(self, "_sp"):
+            import sentencepiece
+            self._sp = sentencepiece.SentencePieceProcessor(model_file=str(SPM_MODEL))
+            self._index = {t: i for i, t in enumerate(self.token_list)}
+        clean = re.sub(r"[^A-Z0-9' ]+", " ", text.upper()).split()
+        return [self._index.get(p, self._index.get("<unk>", 1)) for p in self._sp.encode(" ".join(clean), out_type=str)]
+
+    def score(self, enc, candidates, ctc_weight=None):
+        """Closed-set lip-reading: how well each candidate phrase fits the clip, in one batched pass (no search).
+
+        Returns [(candidate, log_prob), ...] best first, using the same decoder + CTC mix as decoding, so the
+        scores are comparable with decode_enc()'s.
+        """
+        import torch.nn.functional as F
+        from espnet.nets.pytorch_backend.transformer.mask import target_mask
+        w = self.beam_search.weights["ctc"] if ctc_weight is None else ctc_weight
+        ids = [self.tokens(c) or [0] for c in candidates]
+        k, longest, eos = len(ids), max(len(i) for i in ids), self.model.eos
+        dev = enc.device
+        ys_in = torch.full((k, longest + 1), eos, dtype=torch.long, device=dev)
+        ys_out = torch.full((k, longest + 1), -1, dtype=torch.long, device=dev)
+        for j, seq in enumerate(ids):
+            ys_in[j, 0] = self.model.sos
+            ys_in[j, 1:len(seq) + 1] = torch.tensor(seq)
+            ys_out[j, :len(seq)] = torch.tensor(seq)
+            ys_out[j, len(seq)] = eos
+        with torch.no_grad():
+            mem = enc.expand(k, -1, -1)
+            pred, _ = self.model.decoder(ys_in, target_mask(ys_in, -1), mem, None)
+            logp = F.log_softmax(pred, dim=-1)
+            valid = ys_out >= 0
+            att = (logp.gather(-1, ys_out.clamp(min=0).unsqueeze(-1)).squeeze(-1) * valid).sum(-1)
+            lp = self.model.ctc.log_softmax(enc).transpose(0, 1).expand(-1, k, -1)  # (T, k, V)
+            targets = torch.tensor([t for seq in ids for t in seq], dtype=torch.long)
+            lengths = torch.tensor([len(seq) for seq in ids])
+            ctc = -F.ctc_loss(lp.cpu(), targets, torch.full((k,), lp.shape[0], dtype=torch.long), lengths,
+                              blank=0, reduction="none", zero_infinity=True)
+            total = (1 - w) * att.cpu() + w * ctc
+        return sorted(zip(candidates, total.tolist()), key=lambda c: -c[1])
 
     def transcribe(self, video_path, save_crop=None):
         t0 = time.perf_counter()

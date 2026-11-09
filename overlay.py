@@ -21,6 +21,8 @@ from pathlib import Path
 import cv2
 import numpy as np
 import objc
+from AppKit import NSAttributedString, NSFont, NSFontAttributeName, NSForegroundColorAttributeName, NSTextField
+from Foundation import NSObject
 from AppKit import (NSApplication, NSApplicationActivationPolicyAccessory, NSBackingStoreBuffered, NSColor, NSData,
                     NSDate, NSDefaultRunLoopMode, NSEvent, NSEventMaskAny, NSImage, NSMakeRect, NSPanel, NSScreen,
                     NSStatusWindowLevel, NSView, NSWindowCollectionBehaviorCanJoinAllSpaces,
@@ -163,6 +165,39 @@ def render_status(s, state, status, typing, inputs=None):
     return canvas
 
 
+IND_W, IND_H = 52, 22  # the small activity pill (minimal mode)
+
+
+def render_indicator(s, kind, amp, t):
+    """A small pill that says only what's happening (nothing when nothing is):
+      mouth     a little white wave that moves with your lips      voice     the same, blue, as you speak
+      listen    a soft pulsing dot (listening, you're still)      loading   three dots (reading your lips)
+      working   three amber dots (Claude is on it)                speaking  a little green wave"""
+    canvas = np.zeros((IND_H * s, IND_W * s, 3), np.uint8)
+    cx, cy = IND_W / 2, IND_H / 2
+    if kind in ("mouth", "voice", "speaking"):
+        x = np.linspace(0, 1, 60)
+        if kind == "speaking":
+            a = 2.5 + 1.5 * np.sin(2 * np.pi * 1.1 * t)
+            col = GREEN
+        else:
+            a = 1.0 + 5.0 * float(np.clip(amp, 0, 1))
+            col = WHITE if kind == "mouth" else (255, 200, 120)
+        y = a * np.sin(2 * np.pi * (3 * x - 1.5 * t)) * np.sin(np.pi * x)
+        _line(canvas, np.stack([cx - 17 + 34 * x, cy - y], 1), col, s, width=1.4)
+    elif kind == "listen":
+        r = 2.2 + 0.9 * np.sin(2 * np.pi * 1.2 * t)
+        cv2.circle(canvas, (int(cx * s), int(cy * s)), max(1, int(r * s)), _dim(WHITE, 0.9), -1, cv2.LINE_AA)
+    elif kind in ("loading", "working"):
+        col = AMBER if kind == "working" else _dim(WHITE, 0.85)
+        for k in range(3):
+            dy = 2.2 * max(0.0, np.sin(2 * np.pi * (1.4 * t - k * 0.18)))
+            cv2.circle(canvas, (int((cx + (k - 1) * 7) * s), int((cy - dy) * s)), max(1, int(1.7 * s)), col, -1,
+                       cv2.LINE_AA)
+    _glow(canvas, 3 * s, 0.5)
+    return canvas
+
+
 def render_pill_labels(s, typing, voice, face, gesture, mic):
     """Labels and status dots for the glass capsule buttons. Returns canvas and button rects (points, row-relative)."""
     canvas = np.zeros((PILL_H * s, W * s, 3), np.uint8)
@@ -183,12 +218,18 @@ def render_pill_labels(s, typing, voice, face, gesture, mic):
     return canvas, buttons
 
 
-def render_text(s, conversation, notice):
+def text_lines(conversation, notice):
+    n = sum(len(textwrap.wrap(f"{who}: {t}", 46)) for who, t in conversation[-8:])
+    return n + (len(textwrap.wrap(notice, 46)) if notice else 0)
+
+
+def render_text(s, conversation, notice, height=TEXT_H):
     """Transcript: newest at the bottom, older lines fade."""
+    TEXT_H = height
     canvas = np.zeros((TEXT_H * s, W * s, 3), np.uint8)
     lines = []
     for who, t in conversation[-8:]:
-        col = {"You": (255, 230, 170), "Typed": (140, 200, 255)}.get(who, (245, 245, 245))
+        col = {"You": (255, 230, 170), "Typed": (140, 200, 255), "Notification": (150, 225, 255)}.get(who, (245, 245, 245))
         lines += [(part, col) for part in textwrap.wrap(f"{who}: {t}", 46)]
     if notice:
         lines += [(part, (140, 175, 255)) for part in textwrap.wrap(notice, 46)]
@@ -307,9 +348,26 @@ TINT_ON = {"type": _rgba(1.0, 0.75, 0.35, 0.22), "voice": _rgba(0.55, 0.92, 0.6,
            "face": _rgba(0.6, 0.88, 1.0, 0.22), "mic": _rgba(1.0, 0.6, 0.9, 0.22)}
 
 
+class KeyPanel(NSPanel):
+    """A panel that can take typing (for the text box) without activating silent chat's app."""
+
+    def canBecomeKeyWindow(self):
+        return bool(getattr(self, "ov_typing", False))
+
+
+class _FieldTarget(NSObject):
+    def submit_(self, field):
+        text = str(field.stringValue()).strip()
+        field.setStringValue_("")
+        if text and self.ov_owner.on_text:
+            self.ov_owner.on_text(text)
+
+
 class Overlay:
-    def __init__(self, on_button, state_file):
+    def __init__(self, on_button, state_file, on_text=None):
         self.on_button, self.state_file, self.buttons, self.cache = on_button, Path(state_file), {}, {}
+        self.on_text, self.alpha, self.alpha_goal = on_text, 1.0, 1.0
+        self.parts = {"pills": True, "text": True, "field": False}
         self.app = NSApplication.sharedApplication()
         self.app.setActivationPolicy_(NSApplicationActivationPolicyAccessory)  # no Dock icon; floats over full screen
         self.app.finishLaunching()
@@ -318,7 +376,7 @@ class Overlay:
         side = saved.get("side", "right")
         x = screen.origin.x + 12 if side == "left" else screen.origin.x + screen.size.width - W - 12
         y = saved.get("y", screen.origin.y + screen.size.height - H - 12)
-        self.panel = NSPanel.alloc().initWithContentRect_styleMask_backing_defer_(
+        self.panel = KeyPanel.alloc().initWithContentRect_styleMask_backing_defer_(
             NSMakeRect(x, y, W, H), NSWindowStyleMaskBorderless | NSWindowStyleMaskNonactivatingPanel,
             NSBackingStoreBuffered, False)
         self.panel.setFloatingPanel_(True)  # must come before setLevel_, which it would otherwise reset to "floating"
@@ -336,19 +394,41 @@ class Overlay:
         def frame(x0, y0, w, h):  # y-down layout -> AppKit's y-up coordinates
             return NSMakeRect(x0, H - y0 - h, w, h)
 
-        root.addSubview_(_glass(frame(0, STATUS_Y, W, STATUS_H), STATUS_H / 2, TINT_CARD))
+        self.status_glass = _glass(frame(0, STATUS_Y, W, STATUS_H), STATUS_H / 2, TINT_CARD)
+        root.addSubview_(self.status_glass)
+        self._frame, self.minimal, self.ind_side = frame, False, None
         self.pill_glass, x = {}, 0.0
         for name, _, bw in PILLS:
             self.pill_glass[name] = _glass(frame(x, PILLS_Y, bw, PILL_H), PILL_H / 2, TINT_OFF)
             root.addSubview_(self.pill_glass[name])
             x += bw + PILL_GAP
-        root.addSubview_(_glass(frame(0, TEXT_Y, W, TEXT_H), 22, TINT_CARD))
+        self.text_glass = _glass(frame(0, TEXT_Y, W, TEXT_H), 22, TINT_CARD)
+        root.addSubview_(self.text_glass)
+        # the text box: in the buttons' row, shown when typing is the better way in (see set_parts)
+        self.field_glass = _glass(frame(0, PILLS_Y, W, PILL_H), PILL_H / 2, TINT_CARD)
+        self.field = NSTextField.alloc().initWithFrame_(frame(16, PILLS_Y + 8, W - 32, PILL_H - 14))
+        self.field.setBezeled_(False)
+        self.field.setDrawsBackground_(False)
+        self.field.setFocusRingType_(1)  # (none)
+        self.field.setTextColor_(NSColor.whiteColor())
+        self.field.setFont_(NSFont.systemFontOfSize_(14))
+        self.field.setPlaceholderAttributedString_(NSAttributedString.alloc().initWithString_attributes_(
+            "Type to Claude, then Return", {NSForegroundColorAttributeName: _rgba(1, 1, 1, 0.45),
+                                            NSFontAttributeName: NSFont.systemFontOfSize_(14)}))
+        self.field_target = _FieldTarget.alloc().init()
+        self.field_target.ov_owner = self
+        self.field.setTarget_(self.field_target)
+        self.field.setAction_("submit:")
+        for v in (self.field_glass, self.field):
+            v.setHidden_(True)
         self.views = {}
         for name, y0, h in (("status", STATUS_Y, STATUS_H), ("pills", PILLS_Y, PILL_H), ("text", TEXT_Y, TEXT_H)):
             view = OverlayView.alloc().initWithFrame_(frame(0, y0, W, h))  # glyphs on top of the glass
             view.ov_owner, view.ov_name = self, name
             root.addSubview_(view)
             self.views[name] = view
+        for v in (self.field_glass, self.field):
+            root.addSubview_(v)
         self.panel.setContentView_(root)
         self.panel.orderFrontRegardless()
         self.scale = max(1, int(round(self.panel.backingScaleFactor())))
@@ -368,12 +448,60 @@ class Overlay:
         self.views[name].ov_image = _nsimage(to_rgba(canvas), W, height)
         self.views[name].setNeedsDisplay_(True)
 
-    def show(self, inputs, state, status, voice, face, gesture, conversation, notice, typing=False, mic=False):
+    def set_minimal(self, on):
+        """Minimal: a small activity pill (render_indicator) at the top, by the screen edge, instead of the status
+        bar; the transcript card right under it and the text box under that."""
+        f = self.panel.frame()
+        screen = (self.panel.screen() or NSScreen.mainScreen()).frame()
+        side = "right" if f.origin.x + f.size.width / 2 > screen.origin.x + screen.size.width / 2 else "left"
+        if on == self.minimal and (not on or side == self.ind_side):
+            return
+        self.minimal, self.ind_side, fr = on, side, self._frame
+        if on:
+            x = W - IND_W if side == "right" else 0
+            st, card, box = fr(x, 0, IND_W, IND_H), fr(0, IND_H + 6, W, TEXT_H), fr(0, IND_H + 12 + TEXT_H, W, PILL_H)
+            self.status_glass.setCornerRadius_(IND_H / 2)
+        else:
+            st, card, box = fr(0, STATUS_Y, W, STATUS_H), fr(0, TEXT_Y, W, TEXT_H), fr(0, PILLS_Y, W, PILL_H)
+            self.status_glass.setCornerRadius_(STATUS_H / 2)
+        for v in (self.status_glass, self.views["status"]):
+            v.setFrame_(st)
+        for v in (self.text_glass, self.views["text"]):
+            v.setFrame_(card)
+        self.field_glass.setFrame_(box)
+        self.field.setFrame_(NSMakeRect(box.origin.x + 16, box.origin.y + 6, W - 32, PILL_H - 14))
+        self.cache.pop("text", None)
+
+    def show(self, inputs, state, status, voice, face, gesture, conversation, notice, typing=False, mic=False,
+             minimal=False, indicator=None, amp=0.0):
         s = self.scale
-        self._put("status", render_status(s, state, status, typing, inputs), STATUS_H)  # live badges: every frame
+        self.set_minimal(minimal)
+        if minimal:  # only a small pill, and only while something is happening
+            import time as _t
+            for v in (self.status_glass, self.views["status"]):
+                v.setHidden_(indicator is None)
+            if indicator is not None:
+                self.views["status"].ov_image = _nsimage(to_rgba(render_indicator(s, indicator, amp, _t.monotonic())),
+                                                         IND_W, IND_H)
+                self.views["status"].setNeedsDisplay_(True)
+        else:
+            for v in (self.status_glass, self.views["status"]):
+                v.setHidden_(False)
+            self._put("status", render_status(s, state, status, typing, inputs), STATUS_H)  # live badges
+        th = TEXT_H
+        if minimal:  # the card fits its text
+            th = int(min(TEXT_H, max(40, 26 + 15 * text_lines(conversation, notice))))
         for name, key, draw, h in (
-                ("text", (tuple(conversation[-8:]), notice), lambda: render_text(s, conversation, notice), TEXT_H),):
+                ("text", (tuple(conversation[-8:]), notice, th), lambda: render_text(s, conversation, notice, th), th),):
             if self.cache.get(name) != key:  # the rest only redraws when it changes
+                if minimal:
+                    fr = self._frame(0, IND_H + 6, W, th)
+                    for v in (self.text_glass, self.views["text"]):
+                        v.setFrame_(fr)
+                    self.text_glass.setCornerRadius_(min(22, th / 2))
+                    box = self._frame(0, IND_H + 12 + th, W, PILL_H)
+                    self.field_glass.setFrame_(box)
+                    self.field.setFrame_(NSMakeRect(box.origin.x + 16, box.origin.y + 6, W - 32, PILL_H - 14))
                 self._put(name, draw(), h)
                 self.cache[name] = key
         key = (typing, voice, face, gesture, mic)
@@ -408,10 +536,50 @@ class Overlay:
         except OSError:
             pass
 
+    def set_parts(self, pills=True, text=True, field=False):
+        """Which parts show: the buttons row, the transcript card, the text box (which takes the buttons' row)."""
+        want = {"pills": pills and not field, "text": text, "field": field}
+        if want == self.parts:
+            return
+        self.parts = want
+        for v in list(self.pill_glass.values()) + [self.views["pills"]]:
+            v.setHidden_(not want["pills"])
+        for v in (self.text_glass, self.views["text"]):
+            v.setHidden_(not want["text"])
+        for v in (self.field_glass, self.field):
+            v.setHidden_(not want["field"])
+        self.panel.ov_typing = want["field"]
+        if not want["field"] and self.panel.isKeyWindow():
+            self.panel.resignKeyWindow()
+
+    def focus_field(self):
+        """Put the cursor in the text box (silent chat takes the keyboard until you send or look away)."""
+        if self.parts["field"]:
+            self.panel.makeKeyAndOrderFront_(None)
+            self.panel.makeFirstResponder_(self.field)
+
+    def typing_now(self):
+        return self.parts["field"] and self.panel.isKeyWindow() and bool(str(self.field.stringValue()))
+
+    def tick(self, visible):
+        """Every frame: fade in or out. Smooth, never blocks."""
+        self.alpha_goal = 1.0 if visible else 0.0
+        if abs(self.alpha - self.alpha_goal) > 0.01:
+            self.alpha += (self.alpha_goal - self.alpha) * (0.35 if visible else 0.12)
+            if abs(self.alpha - self.alpha_goal) <= 0.01:
+                self.alpha = self.alpha_goal
+            self.panel.setAlphaValue_(self.alpha)
+        if visible and not self.panel.isVisible():
+            self.panel.orderFrontRegardless()
+        elif self.alpha == 0 and self.panel.isVisible():
+            self.panel.orderOut_(None)
+
     def hide(self):
         self.panel.orderOut_(None)
 
     def unhide(self):
+        self.alpha = self.alpha_goal = 1.0
+        self.panel.setAlphaValue_(1.0)
         self.panel.orderFrontRegardless()
 
     def close(self):

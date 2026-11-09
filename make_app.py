@@ -104,12 +104,48 @@ def build(force=False):
     return True
 
 
+MOTION_APP = Path.home() / "Applications" / "Silent Chat Motion.app"
+
+
+def build_motion(force=False):
+    """The AirPods head-motion helper: a separate background app, so only it needs Motion permission and Silent
+    Chat itself is never rebuilt (which would make macOS ask for all its permissions again)."""
+    source = (ROOT / "app" / "motion.swift").read_text()
+    digest = hashlib.sha256(source.encode()).hexdigest()[:16]
+    stamp = MOTION_APP / "Contents" / "Resources" / "build.txt"
+    if MOTION_APP.exists() and stamp.exists() and stamp.read_text() == digest and not force:
+        return False
+    work = Path(tempfile.mkdtemp(prefix="silent_chat_motion_"))
+    app = work / MOTION_APP.name
+    (app / "Contents" / "MacOS").mkdir(parents=True)
+    (app / "Contents" / "Resources").mkdir()
+    subprocess.run(["swiftc", "-O", "-swift-version", "5", "-target", "arm64-apple-macos14.0",
+                    "-o", str(app / "Contents" / "MacOS" / "SilentChatMotion"), str(ROOT / "app" / "motion.swift")],
+                   check=True)
+    with open(app / "Contents" / "Info.plist", "wb") as f:
+        plistlib.dump({"CFBundleIdentifier": BUNDLE_ID + ".motion", "CFBundleName": "Silent Chat Motion",
+                       "CFBundleExecutable": "SilentChatMotion", "CFBundlePackageType": "APPL",
+                       "CFBundleShortVersionString": "1.0", "CFBundleVersion": "1", "LSMinimumSystemVersion": "14.0",
+                       "LSUIElement": True,
+                       "NSMotionUsageDescription": "Silent Chat uses your AirPods' head motion so you can nod to "
+                                                   "confirm, shake to cancel, and look at things to act on them."}, f)
+    (app / "Contents" / "Resources" / "build.txt").write_text(digest)
+    subprocess.run(["codesign", "--force", "--sign", "-", "--identifier", BUNDLE_ID + ".motion", str(app)], check=True)
+    if MOTION_APP.exists():
+        shutil.rmtree(MOTION_APP)
+    shutil.move(str(app), str(MOTION_APP))
+    shutil.rmtree(work, ignore_errors=True)
+    print(f"Built {MOTION_APP}")
+    return True
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--force", action="store_true", help="rebuild even if the launcher didn't change")
     ap.add_argument("--login", action="store_true", help="open Silent Chat at login")
     args = ap.parse_args()
     build(args.force)
+    build_motion(args.force)
     if args.login:
         r = subprocess.run([str(APP / "Contents" / "MacOS" / "SilentChat"), "--login", "on"],
                            capture_output=True, text=True)

@@ -411,6 +411,13 @@ def cmd_spotify(args):
     cmd, rest = args[0].lower(), args[1:]
     if cmd == "now":
         return out(spotify_now())
+    if cmd != "search" and not dry and not find_app("Spotify"):  # start it hidden, so you stay where you are
+        subprocess.run(["open", "-g", "-j", "-a", "Spotify"], capture_output=True)
+        for _ in range(20):
+            time.sleep(0.25)
+            if find_app("Spotify"):
+                break
+        time.sleep(1.5)  # (it needs a moment before it takes commands)
     if cmd == "play" and rest:
         uri = spotify_uri(rest[0])
         if not uri:
@@ -454,9 +461,43 @@ def cmd_spotify(args):
         "shuffle on|off|repeat on|off|search <words>")
 
 
+def cmd_remember(args):
+    import shortcuts
+    try:
+        out(shortcuts.remember(args[0] if args else "", args[1:]))
+    except ValueError as e:
+        out(f"FAILED: {e}")
+
+
+def cmd_shortcuts(args):
+    import shortcuts
+    out(shortcuts.listing())
+
+
+def cmd_forget(args):
+    import shortcuts
+    out(shortcuts.forget(" ".join(args)))
+
+
+def cmd_rename(args):
+    import shortcuts
+    out(shortcuts.rename(args[0], " ".join(args[1:])) if len(args) >= 2 else "usage: rename <number|phrase> <new>")
+
+
+def cmd_notifications(args):
+    """notifications [--debug]: the notification banners on screen now (--debug: their structure, for tuning)."""
+    import notify
+    dbg = [] if "--debug" in args else None
+    items = notify.banners(debug=dbg)
+    lines = [notify.describe(b) + ("  (panel)" if b["panel"] else "") for b in items] or ["No notifications showing."]
+    out("\n".join(lines + (["--- structure:"] + dbg if dbg is not None else [])))
+
+
 COMMANDS = {"apps": cmd_apps, "open": cmd_open, "focus": cmd_focus, "place": cmd_place, "arrange": cmd_arrange,
             "fullscreen": cmd_fullscreen, "windows": cmd_windows, "minimize": cmd_minimize, "restore": cmd_restore,
-            "look": cmd_look, "url": cmd_url, "spotify": cmd_spotify}
+            "look": cmd_look, "url": cmd_url, "spotify": cmd_spotify, "remember": cmd_remember,
+            "shortcuts": cmd_shortcuts, "forget": cmd_forget, "rename": cmd_rename,
+            "notifications": cmd_notifications}
 
 
 def dispatch(argv):

@@ -17,7 +17,15 @@ APP = Path.home() / "Applications" / "Silent Chat.app"
 ITEMS = [("toggle", "Show Silent Chat"), None,
          ("type", "TYPE: type what I mouth into apps"), ("voice", "VOICE: speak replies"),
          ("face", "FACE: blink / smile / eyebrow gestures"), ("mic", "MIC: speak out loud for corrections"),
-         ("wake", 'HEY CLAUDE: always listen for "Hey Claude"'), None,
+         ("wake", 'HEY CLAUDE: always listen for "Hey Claude"'),
+         ("handsfree", "HANDS-FREE: start when you mouth words at the screen"),
+         ("screen", "SCREEN: Claude sees what's in front with each message"),
+         ("notify", "NOTIFICATIONS: show them here, read out when VOICE is on"),
+         ("lens", "GLASS CIRCLE: show where you're looking"),
+         ("ambient", "AUTO-HIDE: show only while I'm using it"),
+         ("gazecal", "Calibrate Gaze…"), ("gazeshow", "Show Where I'm Looking"), None,
+         ("model:auto", "Model: Auto (Haiku, Opus when needed)"), ("model:haiku", "Model: Haiku (cheapest)"),
+         ("model:opus", "Model: Opus (smartest)"), None,
          ("login", "Open at Login"), ("console", "Open Console (type, /fix, log)"), None,
          ("restart", "Restart Silent Chat"), ("quit", "Quit Silent Chat")]
 
@@ -97,8 +105,14 @@ class StatusMenu:
     def _refresh(self):
         s = self.state()
         self.items["toggle"].setTitle_(f"{'Hide' if s['open'] else 'Show'} Silent Chat      {self.key_label}")
-        for name in ("type", "voice", "face", "mic", "wake"):
+        for name in ("type", "voice", "face", "mic", "wake", "screen", "notify", "lens", "ambient"):
             self.items[name].setState_(1 if s.get(name) else 0)
+        hf = s.get("handsfree", "off")
+        self.items["handsfree"].setState_(1 if hf == "on" else 0)
+        self.items["handsfree"].setTitle_("HANDS-FREE: start when you mouth words at the screen" +
+                                          ("  (measuring only)" if hf == "shadow" else ""))
+        for name in ("auto", "haiku", "opus"):
+            self.items["model:" + name].setState_(1 if s.get("model", "auto") == name else 0)
         login = self.items["login"]
         login.setState_(1 if self.login in ("on", "needs-approval") else 0)
         login.setTitle_("Open at Login (approve it in System Settings > Login Items)"
@@ -107,7 +121,16 @@ class StatusMenu:
     def _clicked(self, name):
         if name == "toggle":
             self.on_command("/hide" if self.state()["open"] else "/show")
-        elif name in ("type", "voice", "face", "mic", "wake", "restart", "quit"):
+        elif name.startswith("model:"):
+            self.model = name.split(":")[1]
+            self.on_command("/model " + self.model)
+        elif name == "gazecal":
+            self.on_command("/gaze calibrate")
+        elif name == "gazeshow":
+            self.on_command("/gaze show 20")
+        elif name == "handsfree":  # (/handsfree alone prints its stats)
+            self.on_command("/handsfree " + ("off" if self.state().get("handsfree") == "on" else "on"))
+        elif name in ("type", "voice", "face", "mic", "wake", "screen", "notify", "lens", "ambient", "restart", "quit"):
             self.on_command("/" + name)
         elif name == "login":
             change = "off" if self.login in ("on", "needs-approval") else "on"

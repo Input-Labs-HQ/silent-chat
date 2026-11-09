@@ -5,3 +5,4 @@
 - Next/previous channel: option+down/up; next unread: option+shift+down.
 - Reading messages, DM names or notifications: `ui Discord --find <words>` or plain `ui Discord` (visible text is listed).
 - All shortcuts: cmd+/.
+- To put a window on the MacBook screen: leave full screen, then menu 'Window > Move to Built-in Retina Display', then full screen again.

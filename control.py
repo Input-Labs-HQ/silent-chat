@@ -336,6 +336,168 @@ def cmd_ui(args):
     return head + "\n" + "\n".join(lines[:limit]) + extra
 
 
+# ----------------------------------------------------------------------------- what's in front, in brief
+
+SKIP_PIDS = set()  # never described (silent chat's own windows)
+KINDS = [("field", "Fields", 5), ("button", "Buttons", 12), ("tab", "Tabs", 6), ("menu button", "Menus", 4),
+         ("popup", "Menus", 4), ("checkbox", "Toggles", 4), ("switch", "Toggles", 4), ("option", "Options", 4),
+         ("row", "Rows", 4), ("link", "Links", 8)]
+NOISE = re.compile(r"^(more options for|more actions for|advertisement|report ad|adchoices)", re.I)
+
+
+def _selected(el, n):
+    """Selected text in the focused element: plain fields, or a web page (text markers)."""
+    sel = _get(el, "AXSelectedText")
+    if isinstance(sel, str) and sel.strip():
+        return sel
+    try:
+        err, rng = AX.AXUIElementCopyAttributeValue(el, "AXSelectedTextMarkerRange", None)
+        if err == 0 and rng is not None:
+            err, s = AX.AXUIElementCopyParameterizedAttributeValue(el, "AXStringForTextMarkerRange", rng, None)
+            if err == 0 and isinstance(s, str):
+                return s
+    except Exception:
+        pass
+    return ""
+
+
+def looking_at(x, y, radius):
+    """What's at screen point (x, y), give or take `radius` points: the nearest controls by distance. -> line or ''."""
+    err, el = AX.AXUIElementCopyElementAtPosition(AX.AXUIElementCreateSystemWide(), x, y, None)
+    if err != 0 or el is None:
+        return ""
+    err, pid = AX.AXUIElementGetPid(el, None)
+    a = NSRunningApplication.runningApplicationWithProcessIdentifier_(pid) if err == 0 else None
+    if a is None or pid in SKIP_PIDS:
+        return ""
+    under = _attrs(el)
+    under_text = _text(under.get("AXValue") if isinstance(under.get("AXValue"), str) else
+                       under.get("AXTitle") or under.get("AXDescription"), 80)
+    near = []
+    try:
+        _, nodes = walk(a, budget_nodes=1500, budget_s=0.3)
+    except Fail:
+        nodes = []
+    for n in nodes:
+        if n["role"] not in ROLES or n["center"] is None or n["sub"] in WINDOW_BUTTONS:
+            continue
+        if n["inside"] is not None and n["role"] not in FIELDS:
+            continue
+        lab = _text(label(n), 40)
+        d = ((n["center"][0] - x) ** 2 + (n["center"][1] - y) ** 2) ** 0.5
+        if lab and d <= radius * 1.5:
+            near.append((d, f"{ROLES[n['role']]} {lab!r}"))
+    near = [w for _, w in sorted(near)[:4]]
+    parts = [f"Looking at ({a.localizedName()}, give or take {radius:.0f} pt):"]
+    if under_text:
+        parts.append(f"under their gaze {under_text!r};")
+    parts.append(("nearest controls, closest first: " + "; ".join(near)) if near else "no control nearby")
+    return " ".join(parts)
+
+
+def context(budget=650, walk_s=0.35, pid=None, gaze=None):
+    """What's in front of the user right now in at most ~budget characters (~budget/2.5 tokens, so <= ~260): the app and window,
+    the focused field, any selected text, the page address, and the window's main controls by label. Sent with
+    each message so Claude can act on "this" without looking first. Read-only; '' when there's nothing to say."""
+    pid = pid or front_pid()
+    a = None if pid in SKIP_PIDS else NSRunningApplication.runningApplicationWithProcessIdentifier_(pid)
+    if a is None:
+        return ""
+    app = AX.AXUIElementCreateApplication(pid)
+    win = window_of(a)
+    title = _text(_get(win, "AXTitle"), 80) if win is not None else ""
+    head = [f"Front: {a.localizedName()}" + (f" - {title!r}" if title else "" if win is not None else " (no window)")]
+    el = _get(app, "AXFocusedUIElement")
+    if el is not None:
+        n = _attrs(el)
+        secure = n.get("AXSubrole") == "AXSecureTextField"
+        if n.get("AXRole") in ROLES:
+            lab = _text(n.get("AXTitle") or n.get("AXDescription") or n.get("AXPlaceholderValue"), 40)
+            focus = "password field" if secure else f"{ROLES[n['AXRole']]} {lab!r}" if lab else ROLES[n["AXRole"]]
+            if not secure and n.get("AXRole") in FIELDS and isinstance(n.get("AXValue"), str) and n["AXValue"].strip():
+                focus += f" containing {_text(n['AXValue'], 80)!r}"
+            head.append(f"Focus: {focus}")
+        sel = "" if secure else _selected(el, n)
+        if sel.strip():
+            head.append(f"Selected: {_text(sel, 200)!r}")
+    if gaze is not None:  # (x, y, radius): what they were looking at as they spoke
+        try:
+            g = looking_at(*gaze)
+        except Exception:
+            g = ""
+        if g:
+            head.append(g)
+    if win is None:
+        return "\n".join(head)
+    enable_web_tree(a)  # (Chrome / Electron: the first time, their web content shows from the next message on)
+    try:
+        _, nodes = walk(a, budget_nodes=1500, budget_s=walk_s)
+    except Fail:
+        nodes = []
+    groups, seen, headings, url, total = {}, set(), [], "", 0
+    for n in nodes:
+        r = n["role"]
+        if r == "AXWebArea" and not url:
+            u = _get(follow(win, n["path"]), "AXURL")
+            u = str(u.absoluteString()) if hasattr(u, "absoluteString") else str(u or "")
+            url = re.sub(r"[?#].*", "", u)[:100] if u.startswith("http") else ""  # (no query: it can hold tokens)
+        if r == "AXHeading" and len(headings) < 3:
+            h = _text(label(n), 50)
+            if h and h not in headings:
+                headings.append(h)
+        if r not in ROLES or n["sub"] in WINDOW_BUTTONS or not n["enabled"] or (n["inside"] is not None and r not in FIELDS):
+            continue
+        kind = "field" if r in FIELDS else ROLES[r]
+        lab = _text(label(n), 40)
+        if n["sub"] == "AXSecureTextField":
+            lab = (lab or "password") + " (password)"
+        elif kind == "field" and isinstance(n["value"], str) and n["value"].strip():
+            lab = f"{lab!r} = {_text(n['value'], 40)!r}" if lab else repr(_text(n["value"], 40))
+        if not lab or (kind, lab) in seen or NOISE.match(lab):
+            continue
+        seen.add((kind, lab))
+        total += 1
+        groups.setdefault(kind, []).append(lab)
+    lines = head + ([f"Page: {url}"] if url else [])
+    used, shown = sum(len(x) + 1 for x in lines), 0
+    merged = {}
+    for kind, name, cap in KINDS:
+        merged.setdefault(name, []).extend(groups.get(kind, [])[:cap])
+    for name, labs in merged.items():
+        if not labs:
+            continue
+        line = f"{name}: "
+        for lab in labs:
+            if used + len(line) + len(lab) + 2 > budget:
+                break
+            line += ("; " if not line.endswith(": ") else "") + lab
+            shown += 1
+        if not line.endswith(": "):
+            lines.append(line)
+            used += len(line) + 1
+    more = f"(+{total - shown} more controls: ui --find <words>)" if total > shown else ""
+    if headings and used + len(more) + 60 < budget:
+        lines.append("Headings: " + "; ".join(headings))
+    text = "\n".join(lines + ([more] if more else []))
+    return text if len(text) <= budget + 60 else text[:budget + 59] + "…"  # (hard cap: ~290 tokens at most)
+
+
+def cmd_context(args):
+    """context [App | --all]: the short summary of what's in front (what's sent with each message)."""
+    if args[:1] == ["--all"]:  # (measuring: every app with a window)
+        out = []
+        for a in NSWorkspace.sharedWorkspace().runningApplications():
+            if a.activationPolicy() == 0 and a.processIdentifier() not in SKIP_PIDS:
+                t0 = time.monotonic()
+                c = context(pid=a.processIdentifier())
+                out.append(f"== {a.localizedName()}: {len(c)} chars (~{len(c) * 2 // 5} tokens), "
+                           f"{(time.monotonic() - t0) * 1000:.0f} ms\n{c}")
+        return "\n".join(out)
+    t0 = time.monotonic()
+    c = context(pid=app_named(" ".join(args)).processIdentifier() if args else None)
+    return f"{c}\n({len(c)} chars, ~{len(c) * 2 // 5} tokens, {(time.monotonic() - t0) * 1000:.0f} ms)"
+
+
 # ----------------------------------------------------------------------------- finding an element again
 
 def resolve(ref):
@@ -728,4 +890,4 @@ def cmd_learn(args):
 
 COMMANDS = {"ui": cmd_ui, "press": cmd_press, "set": cmd_set, "type": cmd_type, "key": cmd_key, "click": cmd_click,
             "scroll": cmd_scroll, "menu": cmd_menu, "see": cmd_see, "wait": cmd_wait, "wait-for": cmd_wait_for,
-            "skill": cmd_skill, "learn": cmd_learn}
+            "skill": cmd_skill, "learn": cmd_learn, "context": cmd_context}
