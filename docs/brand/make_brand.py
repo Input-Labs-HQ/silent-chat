@@ -10,6 +10,13 @@ import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
 HERE = Path(__file__).resolve().parent
+INTER = HERE / "fonts" / "InterVariable.ttf"  # (SIL Open Font License: fonts/Inter-OFL.txt)
+
+
+def inter(size, weight="Bold"):
+    f = ImageFont.truetype(str(INTER), size)
+    f.set_variation_by_name(weight)
+    return f
 S = 1024
 TOP, BOT = (91, 140, 255), (124, 63, 228)  # gradient, top-left -> bottom-right
 SERIF_W, SERIF_H = 300, 64
@@ -75,8 +82,7 @@ def wordmark(dark):
     """Icon + "Input Labs", for READMEs, slides and the web (dark or light background)."""
     h = 240
     ic = icon(h)
-    f = ImageFont.truetype("/System/Library/Fonts/SFNS.ttf", 132)
-    f.set_variation_by_name("Bold")
+    f = inter(132, "Bold")
     text = "Input Labs"
     tw = ImageDraw.Draw(ic).textlength(text, font=f)
     W = int(h + 56 + tw + 24)
