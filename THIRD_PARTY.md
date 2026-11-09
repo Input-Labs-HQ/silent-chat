@@ -14,3 +14,7 @@ None of these are included in this repository; `setup.command` downloads them.
 | Python packages | `requirements.txt` | Each under its own license. |
 
 Claude is used through your own Claude Code installation and account, under Anthropic's terms.
+
+README media: the person in `docs/demo.gif` is stock footage by Antoni Shkraba
+([Pexels](https://www.pexels.com/video/woman-talking-in-front-of-camera-8048249/), Pexels license). Album covers shown
+in the README images belong to their owners.

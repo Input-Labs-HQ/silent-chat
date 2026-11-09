@@ -20,10 +20,11 @@
 > non-commercial use only.
 
 <p align="center">
-  <img src="docs/demo.gif" width="760" alt="Demo: while a video plays, lips silently mouth “play Drake on Spotify”; the notch widens with a wave that follows the lips, shows working dots, then drops down with God's Plan by Drake now playing, without leaving the video">
+  <img src="docs/demo.gif" width="760" alt="Demo: while a video plays, a person says “play Drake on Spotify” to the camera; the notch widens with a wave that follows the lips, shows working dots, then drops down with God's Plan by Drake now playing, without leaving the video">
 </p>
-<p align="center"><sub>Illustrated demo: the island is the real app's, rendered frame by frame; the lips are animated. Album
-artwork © its owners, shown as Spotify displays it.</sub></p>
+<p align="center"><sub>Illustrated demo: the island is the real app's, rendered frame by frame. Speaker: stock footage by
+<a href="https://www.pexels.com/video/woman-talking-in-front-of-camera-8048249/">Antoni Shkraba on Pexels</a>.
+Album artwork © its owners, shown as Spotify displays it.</sub></p>
 
 ## What it does
 
