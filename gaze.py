@@ -19,6 +19,7 @@ from pathlib import Path
 import numpy as np
 
 SAMPLES = Path(__file__).resolve().parent / "data" / "silent_chat" / "gaze_samples.npz"
+CLICKS = Path(__file__).resolve().parent / "data" / "silent_chat" / "gaze_clicks.npz"
 R_EYE = dict(outer=33, inner=133, upper=159, lower=145, iris=468)
 L_EYE = dict(outer=263, inner=362, upper=386, lower=374, iris=473)
 NAMES = ["rh", "rv", "ro", "lh", "lv", "lo", "yaw", "pitch", "tx", "ty", "tz"]
@@ -426,6 +427,15 @@ class Gaze:
         self.hist = collections.deque(maxlen=300)  # (t, x, y)
         self.last_feats, self.calib, self.layer, self.show_until = None, None, None, 0.0
         self.lens, self.lens_on, self.warp_on = None, False, False  # the glass circle that follows your gaze
+        # free calibration from your clicks: you look at what you click, so each click is a labelled example
+        self.feat_hist = collections.deque(maxlen=60)  # (t, features) for the last ~2 s
+        self.clicks, self.refit_at, self.click_note = [], 0, None
+        try:
+            z = np.load(CLICKS)
+            self.clicks = [(f, float(x), float(y)) for f, (x, y) in zip(z["X"], z["Y"])]
+            self.refit_at = len(self.clicks)
+        except (OSError, KeyError, ValueError):
+            pass
         try:
             d = json.loads(self.path.read_text())
             self.model, self.info = Model(**d["model"]), d
@@ -448,6 +458,8 @@ class Gaze:
         head = self.head.update(t, cam, ap)
         f = features(landmarks, matrix, head)
         self.last_feats = f
+        if f is not None:
+            self.feat_hist.append((t, f))
         if self.calib is not None or self.model is None or f is None:
             return self._lens(t, None)
         px, py = self.model.predict(f)[0]
@@ -471,6 +483,65 @@ class Gaze:
         if self.lens is None:
             self.lens = GlassLens(hold=max(40.0, 0.5 * self.radius), warp=self.warp_on and Warper.allowed())
         self.lens.update(t, p)
+
+    def add_click(self, t, x, y):
+        """A click at screen point (x, y), y down. Uses where your eyes were just before it (0.05-0.45 s) as a new
+        calibration example, if it was on the calibrated screen and roughly where gaze said you were looking (a
+        blind click, e.g. while reading something else, is skipped). Every 10 new clicks it refits and keeps the
+        new model only if it's more accurate on clicks it didn't train on. -> a note when it improved, else None."""
+        if self.model is None or self.calib is not None:
+            return None
+        q = self.info.get("screen")
+        if not q or not (q[0] <= x <= q[0] + q[2] and q[1] <= y <= q[1] + q[3]):
+            return None
+        fs = [f for tt, f in self.feat_hist if t - 0.45 <= tt <= t - 0.05]
+        if len(fs) < 4:
+            return None
+        f = np.median(np.array(fs), 0)
+        if np.linalg.norm(self.model.predict(f)[0] - np.array([x, y])) > max(300.0, 3 * self.radius):
+            return None
+        self.clicks.append((f, float(x), float(y)))
+        self.clicks = self.clicks[-400:]
+        if len(self.clicks) >= 20 and len(self.clicks) - self.refit_at >= 10:
+            self.refit_at = len(self.clicks)
+            return self.refit_with_clicks()
+        return None
+
+    def refit_with_clicks(self):
+        """Calibration frames + your clicks -> a new model, judged on the newest quarter of the clicks."""
+        try:
+            np.savez(CLICKS, X=np.array([c[0] for c in self.clicks]), Y=np.array([c[1:] for c in self.clicks]))
+            z = np.load(SAMPLES)
+        except (OSError, KeyError, ValueError):
+            return None
+        n_test = max(5, len(self.clicks) // 4)
+        train, test = self.clicks[:-n_test], self.clicks[-n_test:]
+        fit = ~z["test"]
+        X, Y, g = _clean(z["X"][fit], z["Y"][fit], z["g"][fit])
+        cX = np.array([c[0] for c in train])
+        cY = np.array([c[1:] for c in train])
+        cg = 1000 + np.arange(len(train))
+        rep = 4  # (a click is one look; a calibration dot is ~20 frames: weight clicks up a little)
+        X2 = np.vstack([X] + [cX] * rep)
+        Y2 = np.vstack([Y] + [cY] * rep)
+        g2 = np.concatenate([g] + [cg] * rep)
+        new, _ = Model.fit(X2, Y2, g2)
+        tX, tY = np.array([c[0] for c in test]), np.array([c[1:] for c in test])
+        old_err = float(np.median(np.linalg.norm(self.model.predict(tX) - tY, axis=1)))
+        new_err = float(np.median(np.linalg.norm(new.predict(tX) - tY, axis=1)))
+        entry = {"date": time.strftime("%Y-%m-%d %H:%M"), "clicks": len(self.clicks), "old_click_error_pt": old_err,
+                 "new_click_error_pt": new_err, "kept": new_err < old_err * 0.95}
+        with open(self.path.with_name("gaze_eval.log"), "a") as fh:
+            fh.write(json.dumps({"click_refit": entry}) + "\n")
+        if not entry["kept"]:
+            return None
+        self.model = new
+        self.info.update(model=new.to_dict(), look_error_pt=min(self.info.get("look_error_pt", new_err), new_err),
+                         click_refits=self.info.get("click_refits", 0) + 1, click_error_pt=new_err)
+        self.path.write_text(json.dumps(self.info))
+        mm = self.info.get("mm_per_pt") or 0
+        return (f"Gaze tuned from your clicks: {old_err:.0f} -> {new_err:.0f} pt"
+                + (f" ({new_err * mm / 10:.1f} cm)" if mm else "") + " on clicks it hadn't seen.")
 
     def hide_lens(self):
         if self.lens is not None:

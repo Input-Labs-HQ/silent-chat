@@ -148,6 +148,12 @@ def parse(text, front_bundle=""):
         return None  # "open my DMs with ..." etc.: Claude's job
     if re.fullmatch(r"scroll (up|down)(?: a bit| more| a little)?", t):
         return Command("macctl", ["scroll", t.split()[1]], "")
+    # a web search ("search for flights to Tokyo", "google best ramen near me"), not a search *in* something
+    m = re.fullmatch(r"(?:search(?: the web| google)?(?: for)?|google|look up) (.+)", t)
+    if m and not re.search(r"\b(my|in|on|inside|from)\b", m.group(1)):
+        from urllib.parse import quote_plus
+        return Command("macctl", ["url", "https://www.google.com/search?q=" + quote_plus(m.group(1))],
+                       f"Searching for {m.group(1)}.")
     # browser tabs (only when a browser is in front)
     if front_bundle in BROWSERS:
         if re.fullmatch(r"(?:close|close this|close the) tab", t):

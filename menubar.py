@@ -24,6 +24,7 @@ ITEMS = [("toggle", "Show Silent Chat"), None,
          ("lens", "GLASS CIRCLE: show where you're looking"),
          ("ambient", "AUTO-HIDE: show only while I'm using it"),
          ("gazecal", "Calibrate Gaze…"), ("gazeshow", "Show Where I'm Looking"), None,
+         ("settings", "Settings…"),
          ("model:auto", "Model: Auto (Haiku, Opus when needed)"), ("model:haiku", "Model: Haiku (cheapest)"),
          ("model:opus", "Model: Opus (smartest)"), None,
          ("login", "Open at Login"), ("console", "Open Console (type, /fix, log)"), None,
@@ -124,6 +125,8 @@ class StatusMenu:
         elif name.startswith("model:"):
             self.model = name.split(":")[1]
             self.on_command("/model " + self.model)
+        elif name == "settings":
+            self.on_command("/settings")
         elif name == "gazecal":
             self.on_command("/gaze calibrate")
         elif name == "gazeshow":

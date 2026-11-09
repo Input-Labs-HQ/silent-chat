@@ -48,6 +48,7 @@ class Router:
         self.model = self.tok = None
         self.loading, self.error, self.lock = False, None, threading.Lock()
         self.stats = []  # ms per decision
+        self.last_used = time.monotonic()
 
     def load_async(self):
         if self.model is not None or self.loading:
@@ -67,9 +68,32 @@ class Router:
     def ready(self):
         return self.model is not None
 
+    @property
+    def usable(self):
+        """Can it decide? (Loaded, or loadable: it unloads when idle and reloads in ~2 s.)"""
+        return self.error is None
+
+    def _load_now(self):
+        with self.lock:
+            if self.model is None:
+                from mlx_lm import load
+                self.model, self.tok = load(MODEL)
+
+    def unload_if_idle(self, seconds=300):
+        """Free its ~0.8 GB after a few minutes without hands-free reads."""
+        if self.model is not None and time.monotonic() - self.last_used > seconds and not self.lock.locked():
+            import gc
+            import mlx.core as mx
+            with self.lock:
+                self.model = self.tok = None
+                gc.collect()
+                mx.clear_cache()
+
     def decide(self, hyps, front="", apps=()):
         """-> {"kind": "ignore"|"act"|"claude", "text": str, "cmd": [macctl args] or None, "ms": int}"""
         from mlx_lm import generate
+        self._load_now()
+        self.last_used = time.monotonic()
         msgs = [{"role": "system", "content": SYSTEM}]
         for q, a in SHOTS:
             msgs += [{"role": "user", "content": q}, {"role": "assistant", "content": a}]
@@ -85,6 +109,26 @@ class Router:
         ms = round((time.monotonic() - t0) * 1000)
         self.stats.append(ms)
         return parse(out, hyps, ms)
+
+
+def _classify(self, system, text, max_tokens=8, shots=()):
+    """A one-word judgement from the same small model (privacy.py uses it). shots: [(input, answer)]. -> answer."""
+    from mlx_lm import generate
+    self._load_now()
+    self.last_used = time.monotonic()
+    msgs = [{"role": "system", "content": system}]
+    for q, a in shots:
+        msgs += [{"role": "user", "content": q}, {"role": "assistant", "content": a}]
+    msgs.append({"role": "user", "content": text})
+    try:
+        prompt = self.tok.apply_chat_template(msgs, add_generation_prompt=True, tokenize=False, enable_thinking=False)
+    except TypeError:
+        prompt = self.tok.apply_chat_template(msgs, add_generation_prompt=True, tokenize=False)
+    with self.lock:
+        return generate(self.model, self.tok, prompt=prompt, max_tokens=max_tokens, verbose=False)
+
+
+Router.classify = _classify
 
 
 def parse(out, hyps, ms=0):

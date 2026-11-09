@@ -33,17 +33,23 @@ SYMBOL = {"mouth": "mouth", "voice": "waveform", "listen": "ear", "loading": "ey
           "speaking": "speaker.wave.2.fill"}
 
 
-def notch():
-    """(screen, notch rect (x0, x1) in AppKit x, notch height). The built-in screen's notch, or a pretend one."""
-    screens = NSScreen.screens()
-    for s in screens:
-        if s.safeAreaInsets().top > 0:
-            l, r = s.auxiliaryTopLeftArea(), s.auxiliaryTopRightArea()
-            return s, (l.origin.x + l.size.width, r.origin.x), s.safeAreaInsets().top
-    s = NSScreen.mainScreen() or screens[0]
-    f = s.frame()
+def notch(screen=None):
+    """(screen, notch (x0, x1) in AppKit x, notch height) for the screen you're using (the one with the mouse):
+    its real notch, or on a screen without one a pretend notch the height of the menu bar, at the top centre."""
+    if screen is None:
+        from AppKit import NSEvent
+        m = NSEvent.mouseLocation()
+        screen = next((s for s in NSScreen.screens()
+                       if s.frame().origin.x <= m.x < s.frame().origin.x + s.frame().size.width
+                       and s.frame().origin.y <= m.y <= s.frame().origin.y + s.frame().size.height),
+                      None) or NSScreen.mainScreen() or NSScreen.screens()[0]
+    if screen.safeAreaInsets().top > 0:
+        l, r = screen.auxiliaryTopLeftArea(), screen.auxiliaryTopRightArea()
+        return screen, (l.origin.x + l.size.width, r.origin.x), screen.safeAreaInsets().top
+    f, v = screen.frame(), screen.visibleFrame()
+    menu = max(22.0, (f.origin.y + f.size.height) - (v.origin.y + v.size.height))
     mid = f.origin.x + f.size.width / 2
-    return s, (mid - 90, mid + 90), 24.0
+    return screen, (mid - 90, mid + 90), min(menu, 37.0)
 
 
 def _white(a):
@@ -165,6 +171,11 @@ class Island:
         playing: {'title', 'artist', 'state', 'art'} for the now-playing card, or None. field: show the text box."""
         lines = [tuple(x) for x in lines if x[1]][-4:]  # (who, text) or (who, text, struck_at)
         self.state.update(ind=ind, amp=amp, lines=lines, playing=playing, field=field)
+        wants = visible and (ind is not None or lines or playing or field)
+        if wants and not self.shown and abs(self.w - (self.nx1 - self.nx0)) < 1:
+            # about to appear: on the screen you're using now (its notch, or the top of another display)
+            self.screen, (self.nx0, self.nx1), self.nh = notch()
+            self.w, self.h, self.vw, self.vh = self.nx1 - self.nx0, self.nh, 0.0, 0.0
         nw = self.nx1 - self.nx0
         if not visible or (ind is None and not lines and not playing and not field):
             goal = (nw, self.nh)

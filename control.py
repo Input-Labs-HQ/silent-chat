@@ -183,6 +183,23 @@ def check_target():
                    f"nothing. Run focus {t['name']!r} first.")
 
 
+def app_and_title(name=None):
+    """(app name, front window title) of the named app, or of the app in front."""
+    a = None
+    if name:
+        n = name.lower()
+        apps = [x for x in NSWorkspace.sharedWorkspace().runningApplications() if x.activationPolicy() == 0]
+        a = next((x for x in apps if (x.localizedName() or "").lower() == n), None) or \
+            next((x for x in apps if n in (x.localizedName() or "").lower()), None)
+    if a is None:
+        pid = front_pid()
+        a = NSRunningApplication.runningApplicationWithProcessIdentifier_(pid) if pid else None
+    if a is None:
+        return "", ""
+    win = window_of(a)
+    return a.localizedName() or "", (_text(_get(win, "AXTitle"), 120) if win is not None else "")
+
+
 def window_of(a):
     app = AX.AXUIElementCreateApplication(a.processIdentifier())
     return _get(app, "AXFocusedWindow") or _get(app, "AXMainWindow") or (_get(app, "AXWindows") or [None])[0]

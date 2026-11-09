@@ -24,13 +24,15 @@
 | ⌨️ **Dictate anywhere** | Hold <kbd>⌥</kbd> in any app, speak or mouth, let go: it's typed where your cursor is. |
 | 🖥️ **Uses your apps** | Opens chats, drafts messages, arranges windows, runs Todoist and Spotify (in the background). It asks before sending, deleting or buying. |
 | 👀 **Knows your screen** | Each message carries a short summary of the window in front, so “what is this?” or “press Send” needs no extra look. |
+| 🔒 **Keeps private things private** | A check on your Mac holds back banking, health, password and ID windows, and blanks card numbers, codes and keys, before anything reaches Claude. |
 | 🎯 **Knows where you look** | Eye tracking (steadied by your AirPods) tells Claude what you were looking at as you spoke, with a subtle glass lens showing where. |
 | ⚡ **Instant commands** | “Pause”, “next song”, “open Discord”, a button's name or a saved shortcut runs in a fraction of a second, with no model. |
 | 🌱 **Builds its own features** | Learns shortcuts and per-app tips from how you use it, tweaks the ones you use, and removes ones you haven't used for 7 days. |
 | 🔔 **Notifications** | New ones drop down from the notch; say “reply …” and Claude drafts it, then asks. |
 | 🙂 **Nod or shake** | Answer Claude's yes/no questions with your head, tracked by your AirPods when they're in. |
 | 📈 **Learns you** | Fine-tunes the lip-reader on clips of your own mouth. |
-| 💸 **Easy on your plan** | Everyday commands and hands-free filtering run on your Mac. Haiku answers the rest, and only hard requests go to Opus. |
+| 💸 **Easy on your plan** | Everyday commands, hands-free filtering and the privacy check run on your Mac. Haiku answers the rest, and only hard requests go to Opus. |
+| 🪶 **Light** | About 2 GB when idle: big models load only when needed, and the camera turns off when you walk away. |
 
 <p align="center">
   <img src="docs/island-states.png" width="860" alt="Six island states: listening with a wave that follows your lips, working dots, now playing with controls, a misread struck through, a reply, and the hover-to-type box">
@@ -49,8 +51,9 @@ and `brew install uv ffmpeg`.
 git clone https://github.com/justbenzo/silent-chat && cd silent-chat && ./setup.command
 ```
 
-Setup downloads the models (~2.5 GB) and puts **Silent Chat** in your menu bar, opening at login. The small
-hands-free model (~1.8 GB) downloads the first time you turn HANDS-FREE on. Allow Camera, Accessibility and Input Monitoring when macOS asks, then tap <kbd>\\</kbd>
+Setup downloads the models (~2.5 GB) and puts **Silent Chat** in your menu bar, opening at login. The small local
+model (~1.8 GB, for hands-free and the privacy check) downloads the first time it's needed. On first start, a setup
+window lists the permissions it needs, with a live check mark and a button to each System Settings page. Allow Camera, Accessibility and Input Monitoring when macOS asks, then tap <kbd>\\</kbd>
 to turn the camera on.
 
 ## Controls
@@ -65,11 +68,15 @@ to turn the camera on.
 | Long blink · smile · raise eyebrows | Listen · delete a word · Enter |
 | Nod · shake your head | Yes · no, when Claude asks |
 | Tap <kbd>\\</kbd> while Claude is working | Stop it |
+| Menu bar > Settings… | Every switch in one place |
+
+<p align="center"><img src="docs/settings.png" width="420" alt="The Settings window: switches for hands-free, Hey Claude, spoken replies, the notch, screen and gaze awareness, the glass lens, notifications, self-improvement and face gestures, plus the Claude model"></p>
 
 ## Privacy
 
-Lip-reading, face and eye tracking, the wake word, speech-to-text and the hands-free model run on your Mac. Clips of your mouth stay in `data/` and
-are never uploaded. Claude only gets text: what you said or typed, a short summary of the window in front
+Lip-reading, face and eye tracking, the wake word, speech-to-text, the hands-free model and the privacy check run
+on your Mac. Clips of your mouth stay in `data/` and
+are never uploaded. Claude only gets text: what you said or typed, a short, privacy-checked summary of the window in front
 (SCREEN in the menu turns it off), notifications from the last few minutes (never codes or passwords), and what it
 reads on screen when you ask it to act. The glass lens bends a small patch of screen under your gaze on the fly;
 that patch is never kept or sent.

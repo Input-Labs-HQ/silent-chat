@@ -27,8 +27,11 @@ The goal is to talk to Claude with mouth movements only. It runs as a **menu bar
 up (camera off), Claude answers out loud, and it hides again a few seconds after the conversation goes quiet.
 * Say it in one breath ("Hey Claude, what's on my to-do list?") or pause after "Hey Claude" (it chimes) and then
   say your request. After Claude answers, you have 5 s to reply without saying "Hey Claude" again.
-* It all runs on this Mac: the mic level shows when someone's speaking, and local Whisper checks only the first ~2 s
-  of each utterance for "Hey Claude". Speech without it is dropped right away and never sent anywhere.
+* It all runs on this Mac. A voice detector (Silero VAD, 2 MB) first checks the sound is a person speaking, so
+  music, videos, typing and room noise are never transcribed. Then a small Whisper (base.en, ~30 ms) checks the
+  first ~2 s for "Hey Claude", and only then does the big Whisper transcribe your request. Speech without it is
+  dropped right away and never sent anywhere. Before this, the listener ran Whisper thousands of times a day on
+  silence and wrote junk like "Closed Captioning by …"; that's gone, and those stock phrases are filtered too.
 * The mic stays on while it's enabled, so macOS shows its orange mic dot. Turn it off with the menu bar item
   "HEY CLAUDE", `/wake`, or by asking Claude ("turn off the wake word"). The setting is kept across restarts
   (`data/silent_chat/settings.json`).
@@ -124,6 +127,21 @@ Send" need no extra look first.
   tokens and no time.
 * Turn it off with **SCREEN** in the menu bar or `/screen off`. `macctl context [App]` prints exactly what's sent.
 
+**Private things stay private (privacy check).** Everything that reads your screen for Claude goes through a check
+on your Mac first: the screen summary, what's under your gaze, and Claude's own `ui`, `see` (screenshot) and
+`context` look-ups. Cheapest first:
+1. **Rules (free):** password managers, and banking, investing, crypto, tax, health-portal and sign-in pages are
+   private outright. Card and account numbers, ID numbers, one-time codes, API keys, tokens and `password: …` are
+   blanked anywhere, including in Claude's own look-ups.
+2. **The small local model** (the same Qwen3 1.7B hands-free uses) reads each new window's summary once and decides
+   whether the window as a whole is private: financial, medical, credentials or ID documents. About 80 ms, cached
+   per window, and it runs while you're still mouthing, so it adds no wait. If its answer isn't ready in time,
+   nothing about the screen is sent (it fails closed).
+* A private window reaches Claude as one line, "Front: Chase (private: financial, not shared)", and Claude's
+  screenshots and `ui` refuse on it and ask you instead. Ordinary chats, email lists, music, code and websites
+  pass through as usual.
+* Verdicts are kept in `data/silent_chat/privacy.json` (window names and a category only).
+
 **Instant on-screen commands (no model).** When you mouth something short, the lip-reader also scores it against
 what you could do right now: the fixed commands, your running apps, the front window's buttons and links ("press
 Compose"), and your saved shortcuts. Picking from a list of about 40 is far easier than reading free text, so a
@@ -193,7 +211,8 @@ eyes are on it), and fades out. The next time it starts fresh; Claude still reme
     it speaks;
   * **expanded** (it drops into a rounded card sized to the text) with the reply;
   * **now playing** after you play or skip a song: album art, song, artist, and ⏮ ⏯ ⏭ you can click.
-  On a screen without a notch it hangs from the top centre the same way.
+  It opens on the screen you're using (the one with the mouse); on a screen without a notch it hangs from the top
+  centre, the height of the menu bar.
 * **Hover over the island (or the bare notch) to type.** The chat drops down with your recent conversation and a
   text box. Click the box, type, and press Return. It closes when the mouse leaves, unless the box has text in it.
   It never takes the keyboard by itself.
@@ -224,7 +243,10 @@ and then:
    * **hands it to Claude** with the fixed words ("please write up on Spotify" → "play rap on Spotify"). Claude can
      still answer IGNORE, and then it's struck through.
    Closing or pressing anything always goes to Claude, so a misread can't close your work.
-Each false start makes hands-free about 5% harder to set off, up to +60%, and each real use eases it back. Every
+Each false start makes hands-free about 5% harder to set off, up to +60%, and each real use eases it back. It
+also learns where "facing the screen" is for you: after 8 deliberate starts (Option or a long blink) it only starts
+by itself when your head is within about 10° of how you usually hold it then. (A fixed cutoff looked perfect on the
+log but would have blocked real use on the MacBook screen.) Every
 decision is logged in `handsfree.log`. On past reads the local model used a median of ~0.4 s. The model is
 `mlx-community/Qwen3-1.7B-4bit` (1.8 GB on disk, in `~/.cache/huggingface`).
 
@@ -259,10 +281,28 @@ anything because of where you looked; it acts only when you ask, and asks if it 
   exactly where it thinks you look. It snaps to the nearest control, which works when targets are a finger-width
   or more apart. Close-packed small links need a name ("press Settings").
 * **Show Where I'm Looking** (menu bar, or `/gaze show`) draws a ring that follows your gaze for 20 s.
+* **It keeps calibrating itself from your clicks.** You look at what you click, so each click (where gaze already
+  roughly agreed) becomes a calibration example. Every 10 new clicks it refits, and keeps the new model only if it's
+  more accurate on your latest clicks it didn't train on. Each refit is logged in `gaze_eval.log`.
 * `/gaze where [n] [seconds]` is a dry run: every few seconds a tick logs what you're looking at and the nearest
   controls, pressing nothing. Handy for checking it on a new app.
 * It works on the screen it was calibrated on; recalibrate if you move the laptop or your seat a lot. `/gaze off`
   turns it off. Every calibration's results are kept in `data/silent_chat/gaze_eval.log`.
+
+**Settings and first-run setup.** Menu bar > **Settings…** (or `/settings`) has every switch in one window:
+hands-free, "Hey Claude", spoken replies, the notch, screen and gaze awareness, the lens, notifications,
+self-improvement, face gestures and the Claude model, plus Calibrate Gaze and Improve Now. On first start, **Set
+Up Silent Chat** lists the permissions it needs (Camera, Microphone, Accessibility, Input Monitoring, Screen
+Recording, and Claude Code signed in), each with a live check mark and a button to the right System Settings page.
+`/setup` opens it again.
+
+**Memory.** It used to hold 4–5 GB, mostly models idling on the GPU. Now:
+* the big Whisper loads only to transcribe what you say (~0.5 s the first time) and unloads after 2 idle minutes;
+  a 150 MB Whisper listens for "Hey Claude";
+* the local model loads on first use (~2 s) and unloads after 5 idle minutes;
+* the GPU caches PyTorch and MLX keep "for later" are trimmed after each lip-read (often ~2 GB).
+Measured idle: about 2.0 GB, most of it the lip-reader (it stays loaded so mouthing is instant). `/mem` shows what's
+loaded.
 
 **Hands-free start (measuring).** Start listening just by mouthing while you face the screen, with no key and no
 blink. For now it only **measures**: it logs when it *would* have started (`data/silent_chat/handsfree.log`) and
@@ -273,8 +313,11 @@ with **HANDS-FREE** in the menu bar or `/handsfree on` (`off`, or `shadow` to me
 **Checking usage.** `/usage` prints the tokens, model calls, tool calls and time per Claude message over the last
 24 hours, split by whether the screen summary was sent (from `data/silent_chat/usage.log`).
 
-**Show / hide anytime: tap `\`** in any app. Hidden means the overlay is gone, **the camera is off** (its light
-goes out) and nothing listens. The model and Claude stay loaded, so it comes back in about a second.
+**Camera on / off: tap `\`** in any app. Off means **the camera is off** (its light goes out); "Hey Claude",
+Option dictation and replies in the island still work. The lip-reader and Claude stay loaded, so it comes back in
+about a second.
+* **It turns the camera off by itself when you're away:** no face for 2 minutes and no typing or mouse for a
+  minute, or on battery with nothing touched for 3 minutes. Touching the keyboard or mouse brings it back.
 * **Double-tap `\`** to type an actual backslash: the key is swallowed so it can work as a toggle.
 * Shift+`\` (`|`) and shortcuts with `\` pass through as normal.
 * The overlay's **x** and the menu bar icon also hide it. In the console, `/hide` and `/show` work too.
@@ -380,8 +423,11 @@ It learns from your sessions in two ways:
    (`data/silent_chat/labels.csv`):
    * `confirmed`: you picked or typed it
    * `fixed`: you corrected it
-   * `ok`: you carried on without correcting it
+   * `ok`: you carried on without correcting it (this includes instant commands and shortcuts read from your lips:
+     if your next message isn't "no", "undo", "wrong" …, they were right)
    * `heard`: not confirmed yet
+
+   Guesses from the hands-free local model are never saved as training data, since nothing confirmed them.
 
    Clips marked `confirmed`, `fixed`, `ok` or `audio` are training data. Once there are at least 30, plus 15 new
    ones since the last round, it retrains **in the background** whenever you hide silent chat with `\\` (you're not
@@ -418,6 +464,13 @@ labels are all confirmed, so it collects the cleanest training data.
 Limits of this prototype:
 * Claude can talk but has no tools here, so it can't set reminders or send messages.
 * Silent mouthing only. The minimal-movement style is not readable by a camera (see results).
+
+### Tests
+
+`.venv/bin/python -m unittest discover tests` checks, in a fraction of a second and without camera, mic or models:
+instant commands ("please pause", web search vs searching *in* an app), the hands-free word filter, the checks on
+the local model's answers, the wake word and Whisper's silence phrases, the privacy rules and redaction, the safety
+rules for self-built shortcuts, and shortcut matching. `SLOW=1` also runs the local model (routing and privacy).
 
 ## The lip-reading feasibility test (phase 1)
 

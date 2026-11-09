@@ -50,7 +50,8 @@ SCREENS = Path.cwd() / "screens"  # inside Claude's working directory, where it 
 
 
 def out(msg):
-    print(msg, flush=True)
+    import privacy
+    print(privacy.redact(str(msg)), flush=True)  # (card numbers, keys, codes ... never reach Claude)
 
 
 def regular_apps():
@@ -504,6 +505,17 @@ def dispatch(argv):
     """Run one macctl command. True if it worked."""
     import control
     name, args = argv[0], argv[1:]
+    if name in ("see", "ui", "context", "look"):  # reading the screen: not a window judged private
+        import privacy
+        try:
+            app, title = control.app_and_title(args[0] if args and not args[0].startswith("-") else None)
+        except Exception:
+            app, title = "", ""
+        why = privacy.blocked(app, title)
+        if why:
+            out(f"PRIVATE: {app} ('{title}') looks private ({why}), so silent chat won't read or screenshot it. "
+                "Ask the user to tell you what you need from it.")
+            return True
     try:
         if name in control.COMMANDS:
             out(control.COMMANDS[name](args))

@@ -48,6 +48,7 @@ import improve
 import island
 import local_router
 import presence
+import privacy
 from AppKit import NSEvent, NSScreen
 import shortcuts
 import vsr
@@ -515,6 +516,11 @@ def run_live(args):
     notif_watch = notify.Watcher(notif_q.put)
     notif_watch.enabled = ui["notify"]
     # where you're looking (gaze.py): camera iris + head pose (+ AirPods), after /gaze calibrate
+    try:  # MLX keeps freed GPU buffers around for reuse; a small cap stops that growing to gigabytes
+        import mlx.core as _mx
+        _mx.set_cache_limit(256 * 1024 * 1024)
+    except Exception:
+        pass
     import gaze as gaze_mod
     gazer = gaze_mod.Gaze(DATA / "gaze.json")
     ui["gaze"] = settings.get("gaze", True)
@@ -551,8 +557,7 @@ def run_live(args):
         if flag:
             name = mic.start()
             if transcriber["model"] is None:
-                transcriber["model"] = speech.Transcriber()
-                threading.Thread(target=transcriber["model"].warm, daemon=True).start()
+                transcriber["model"] = speech.Transcriber(idle_unload=120)  # (loads on first use, ~1 s)
             return name
         if not wake.enabled:  # "Hey Claude" keeps the mic open
             mic.stop()
@@ -606,8 +611,6 @@ def run_live(args):
 
     def set_handsfree(mode):
         ui["handsfree"] = mode
-        if mode == "on":
-            router.load_async()
         save_setting("handsfree", mode)
         set_notice({"on": "Hands-free on: just start mouthing while you face the screen.",
                     "off": "Hands-free off.", "shadow": "Hands-free is measuring only (it won't start by itself)."}[mode])
@@ -641,6 +644,20 @@ def run_live(args):
         panel.hide()
     pres, ducker = presence.Presence(), presence.Ducker()
 
+    def trim_gpu():
+        """Give back GPU memory the lip-reader (PyTorch) and MLX cached but aren't using (often ~2 GB)."""
+        try:
+            import torch
+            if torch.backends.mps.is_available():
+                torch.mps.empty_cache()
+        except Exception:
+            pass
+        try:
+            import mlx.core as _mx
+            _mx.clear_cache()
+        except Exception:
+            pass
+
     def running_app_names():
         try:
             from AppKit import NSWorkspace
@@ -657,11 +674,18 @@ def run_live(args):
         now_playing_soon(0.5)
 
     isl = island.Island(on_text=lambda t: typed.put(t), on_control=spotify_control)
+    clicks_q = queue.Queue()  # your clicks, for gaze to learn from (gaze.add_click)
+
+    def on_click(event):
+        from AppKit import NSEvent
+        p = NSEvent.mouseLocation()
+        clicks_q.put((time.monotonic(), p.x, NSScreen.screens()[0].frame().size.height - p.y))
+    from AppKit import NSEvent as _NSEvent
+    click_monitor = _NSEvent.addGlobalMonitorForEventsMatchingMask_handler_(1 << 1, on_click)  # (left mouse down)
     # hands-free reads that might be requests: a small local model decides (local_router.py), so Claude only gets
     # the real ones and simple ones run instantly
     router, routed = local_router.Router(), queue.Queue()
-    if settings.get("handsfree") == "on" or args.handsfree == "on":
-        router.load_async()
+    guard = privacy.Guard(router)  # (the same small model judges private windows)
 
     def route_async(result):
         amb["deciding"] = (result["hyps"][0][0].capitalize(), time.monotonic())
@@ -674,7 +698,10 @@ def run_live(args):
                 d = {"kind": "claude", "text": result["hyps"][0][0], "cmd": None, "ms": 0, "error": str(e)}
             routed.put((result, d))
         threading.Thread(target=go, daemon=True).start()
-    amb = {"hidden_at": None, "noface_since": None, "read_failed": 0.0, "duck_off_since": None, "np": queue.Queue(),
+    amb = {"facing": ({"yaw": float(np.median(np.array(settings["real_poses"])[:, 0])),
+                       "pitch": float(np.median(np.array(settings["real_poses"])[:, 1]))}
+                      if len(settings.get("real_poses") or []) >= 8 else None),
+           "hidden_at": None, "noface_since": None, "read_failed": 0.0, "duck_off_since": None, "np": queue.Queue(),
            "hf_gain": settings.get("hf_gain", 1.0)}
 
     def headphones():
@@ -705,12 +732,16 @@ def run_live(args):
                 amb["np"].put({"state": parts[0], "title": parts[1], "artist": parts[2], "art": parts[3]})
         threading.Thread(target=go, daemon=True).start()
 
+    def screen_read(gaze=None):
+        """The screen summary, through the privacy check (privacy.py): private windows become one line."""
+        return guard.filter(control.context(gaze=gaze))
+
     def screen_soon(look=None):
         """Start reading the screen now (in the background), for the message that's about to be sent. look: where
         their eyes were while they spoke (x, y), if gaze is calibrated."""
         if ui["screen"]:
             g = (look[0], look[1], max(60.0, gazer.radius)) if look and ui["gaze"] and gazer.ready else None
-            screen["future"], screen["at"] = ctx_pool.submit(control.context, gaze=g), time.monotonic()
+            screen["future"], screen["at"] = ctx_pool.submit(screen_read, g), time.monotonic()
 
     def screen_now():
         """(block for this message, full block): the screen summary, or one line if it hasn't changed."""
@@ -720,7 +751,7 @@ def run_live(args):
         screen["future"] = None
         if fut is None:  # (typed, or nothing started early): where they looked in the last couple of seconds
             pt = gazer.point(time.monotonic() - 2.0, time.monotonic()) if ui["gaze"] and gazer.ready else None
-            fut = ctx_pool.submit(control.context, gaze=(pt[0], pt[1], max(60.0, gazer.radius)) if pt else None)
+            fut = ctx_pool.submit(screen_read, (pt[0], pt[1], max(60.0, gazer.radius)) if pt else None)
         try:
             ctx = fut.result(timeout=0.8)
         except Exception:
@@ -927,12 +958,49 @@ def run_live(args):
                   "Security > Accessibility AND Input Monitoring (it starts working by itself). Until then use "
                   "the menu bar icon.", flush=True)
     from menubar import StatusMenu
-    menu = StatusMenu(typed.put, lambda: {"open": ui["open"], "type": ui["type"], "voice": speaker.enabled,
-                                          "face": ui["face"], "mic": ui["mic"], "wake": wake.enabled,
-                                          "model": settings.get("model", args.model or "auto"),
-                                          "handsfree": ui["handsfree"], "screen": ui["screen"],
-                                          "notify": ui["notify"], "lens": ui["lens"],
-                                          "ambient": ui["ambient"]}, args.toggle_key)
+    def settings_state():
+        return {"open": ui["open"], "type": ui["type"], "voice": ui["voice_pref"], "face": ui["face"],
+                "mic": ui["mic"], "wake": wake.enabled, "model": settings.get("model", args.model or "auto"),
+                "handsfree": ui["handsfree"], "screen": ui["screen"], "notify": ui["notify"], "lens": ui["lens"],
+                "ambient": ui["ambient"], "gaze": ui["gaze"], "warp": ui["warp"],
+                "improve": improve.load().get("enabled", True)}
+    menu = StatusMenu(typed.put, settings_state, args.toggle_key)
+    import settings_window
+
+    def permission_checks():
+        import shutil
+        import objc
+        import ApplicationServices
+        import Quartz
+        from Foundation import NSBundle
+        NSBundle.bundleWithPath_("/System/Library/Frameworks/AVFoundation.framework").load()
+        av = objc.lookUpClass("AVCaptureDevice")
+        return [
+            ("Camera", "To see your mouth (lip-reading) and where you look.",
+             lambda: av.authorizationStatusForMediaType_("vide") == 3, "Privacy_Camera"),
+            ("Microphone", "For “Hey Claude” and speaking out loud.",
+             lambda: av.authorizationStatusForMediaType_("soun") == 3, "Privacy_Microphone"),
+            ("Accessibility", "To read the window in front and act in apps for you.",
+             lambda: ApplicationServices.AXIsProcessTrusted(), "Privacy_Accessibility"),
+            ("Input Monitoring", f"For the {key_label} key and holding Option.",
+             lambda: bool(toggle and toggle.ok), "Privacy_ListenEvent"),
+            ("Screen Recording", "Optional: for the glass lens and screenshots Claude asks for.",
+             lambda: Quartz.CGPreflightScreenCaptureAccess(), "Privacy_ScreenCapture"),
+            ("Claude Code", "Signed in with your claude.ai plan (claude in Terminal).",
+             lambda: shutil.which("claude") is not None, "https://claude.com/claude-code"),
+        ]
+    win = {"settings": None, "setup": None}
+
+    def open_window(which):
+        if which == "settings":
+            win["settings"] = win["settings"] or settings_window.SettingsWindow(typed.put, settings_state)
+            win["settings"].show()
+        else:
+            win["setup"] = win["setup"] or settings_window.SetupWindow(
+                permission_checks(), typed.put, lambda: save_setting("setup_done", True))
+            win["setup"].show()
+    if not settings.get("setup_done") and not settings.get("model") and not settings.get("handsfree"):
+        open_window("setup")  # (first run)
     if args.mic:
         on_button("mic")
     if settings.get("wake", True) and not args.no_wake:
@@ -1054,6 +1122,7 @@ def run_live(args):
         heard = part.get("typed") or part.get("spoken") or part["hyps"][0][0]
         if part.get("clip") and part.get("hyps"):
             labels.add(part["clip"], heard, "heard", "local", part["hyps"])  # still training data
+            amb.setdefault("local_clips", []).append((part["clip"], time.monotonic()))
         conversation.extend([("You", heard), ("Claude", "...")])
         stop_file.unlink(missing_ok=True)
         speak = bool(cmd.say) and (speaker.enabled or bool(part.get("voice")))
@@ -1081,6 +1150,7 @@ def run_live(args):
         now_steps, later = (steps, []) if ask is None else (steps[:ask], [steps[ask][4:]] + steps[ask + 1:])
         if part.get("clip") and part.get("hyps"):
             labels.add(part["clip"], heard, "heard", "shortcut", part["hyps"])
+            amb.setdefault("local_clips", []).append((part["clip"], time.monotonic()))
         conversation.extend([("You", heard), ("Claude", "...")])
         stop_file.unlink(missing_ok=True)
         speak = speaker.enabled or bool(part.get("voice"))
@@ -1434,7 +1504,36 @@ def run_live(args):
                 if toggle.ok:
                     notice = f"{key_label} now shows/hides silent chat anywhere."
                     print(notice, flush=True)
-            if ui["open"] and cam.cap is None and now - retry["camera"] > 3:
+            # ---- camera off while you're away: no face for 2 min and no typing / mouse for 1 min, or on battery
+            # with nothing touched for 3 min. Back on the moment you touch the keyboard or mouse.
+            if now - amb.get("power_at", -99) > 60:
+                amb["power_at"] = now
+                try:
+                    amb["battery"] = "Battery Power" in subprocess.run(["pmset", "-g", "batt"], capture_output=True,
+                                                                       text=True, timeout=2).stdout
+                except Exception:
+                    amb["battery"] = False
+            if now - amb.get("away_check", 0) > 1.0:
+                amb["away_check"] = now
+                import Quartz
+                idle_input = Quartz.CGEventSourceSecondsSinceLastEventType(
+                    Quartz.kCGEventSourceStateCombinedSessionState, Quartz.kCGAnyInputEventType)
+                if activity.landmarks is not None or (cam.cap is None and not amb.get("away")):
+                    amb["face_at"] = now  # (a face seen, or the camera is off for another reason: not "away")
+                busy_now = turn is not None or cap is not None or hold is not None or bool(pending)
+                if ui["open"] and not amb.get("away") and cam.cap is not None and not busy_now:
+                    no_face = now - amb.get("face_at", now)
+                    if (no_face > 120 and idle_input > 60) or (amb.get("battery") and idle_input > 180 and
+                                                               now - imp["last_msg"] > 180):
+                        amb["away"] = True
+                        cam.pause()
+                        print(f"[camera] paused: {'no one here' if no_face > 120 else 'idle on battery'} "
+                              "(back on when you touch the keyboard or mouse)", flush=True)
+                elif amb.get("away") and (idle_input < 1.5 or not ui["open"]):
+                    amb["away"], amb["face_at"] = False, now
+                    if ui["open"]:
+                        print("[camera] back on", flush=True)
+            if ui["open"] and not amb.get("away") and cam.cap is None and now - retry["camera"] > 3:
                 retry["camera"] = now
                 try:
                     cam.resume(wait_seconds=0)
@@ -1445,6 +1544,10 @@ def run_live(args):
                 frame = cam._read()
                 now = time.monotonic()
                 level = activity(np.ascontiguousarray(frame[..., ::-1]), now)
+                while not clicks_q.empty():
+                    note = gazer.add_click(*clicks_q.get())
+                    if note:
+                        print("[gaze] " + note, flush=True)
                 gazer.update(now, activity.landmarks, activity.matrix, activity.blend,
                              airpods.latest() if airpods is not None else None)
                 if gazer.calib is not None:
@@ -1510,7 +1613,12 @@ def run_live(args):
             # ---- hands-free start: lips moving while you face the screen (measuring mode only logs it)
             hf_trigger = False
             pose = activity.pose
-            facing = pose is not None and abs(pose[0]) < HF_YAW and HF_PITCH[0] < pose[1] < HF_PITCH[1]
+            # "facing the screen": learned from your own deliberate starts (Option / long blink) once there are
+            # 8+, as their typical head pose +-10 deg (+-12 yaw); the wide default until then
+            fp = amb.get("facing") or {}
+            yaw_c, pitch_c = fp.get("yaw", 0.0), fp.get("pitch", (HF_PITCH[0] + HF_PITCH[1]) / 2)
+            yaw_w, pitch_w = (12.0, 10.0) if fp else (HF_YAW, (HF_PITCH[1] - HF_PITCH[0]) / 2)
+            facing = pose is not None and abs(pose[0] - yaw_c) < yaw_w and abs(pose[1] - pitch_c) < pitch_w
             if (ui["handsfree"] != "off" and ui["open"] and not ui["type"] and frame is not None and cap is None
                     and hold is None and level is not None):
                 ready = (facing and not smiling and not smile_squint and eyes < BLINK_OPEN and not speaker.active
@@ -1583,7 +1691,13 @@ def run_live(args):
                     hf["shadow"], hf["since"] = {"start": hf["since"], "last": now}, None
                     hf_note("would-start", f"pose {pose[0]:.0f},{pose[1]:.0f} level {level:.3f}")
                 if cap is not None and cap["mode"] in ("key", "blink"):
-                    hf_note("real-start", cap["mode"])
+                    hf_note("real-start", cap["mode"] + (f" pose {pose[0]:.0f},{pose[1]:.0f}" if pose is not None else ""))
+                    if pose is not None:
+                        poses = (settings.get("real_poses") or [])[-29:] + [[round(pose[0], 1), round(pose[1], 1)]]
+                        save_setting("real_poses", poses)
+                        if len(poses) >= 8:
+                            a = np.array(poses)
+                            amb["facing"] = {"yaw": float(np.median(a[:, 0])), "pitch": float(np.median(a[:, 1]))}
             else:
                 cap["items"].append((now, frame))
                 if cap["mode"] == "key":
@@ -1691,10 +1805,31 @@ def run_live(args):
                     ok = gaze_mod.Warper.allowed(ask=ui["warp"])
                     notice = ("Glass bend on." if ok else "Glass bend: allow Silent Chat under Screen & System Audio "
                               "Recording in System Settings, then restart.") if ui["warp"] else "Glass bend off."
+                elif cmd == "/mem":  # what's holding memory
+                    trim_gpu()
+                    rep = []
+                    try:
+                        import mlx.core as _mx
+                        rep.append(f"MLX active {_mx.get_active_memory() / 1e6:.0f} MB, cache {_mx.get_cache_memory() / 1e6:.0f} MB")
+                    except Exception as e:
+                        rep.append(f"MLX ? {e}")
+                    try:
+                        import torch
+                        rep.append(f"torch MPS allocated {torch.mps.current_allocated_memory() / 1e6:.0f} MB, "
+                                   f"driver {torch.mps.driver_allocated_memory() / 1e6:.0f} MB")
+                    except Exception as e:
+                        rep.append(f"torch ? {e}")
+                    tm = transcriber["model"]
+                    rep.append(f"whisper turbo {'loaded' if tm is not None and tm.loaded is not None else 'not loaded'}, "
+                               f"small {'loaded' if wake.fast is not None and wake.fast.loaded is not None else 'not loaded'}, "
+                               f"local model {'loaded' if router.ready else 'not loaded'}")
+                    print("[mem] " + "; ".join(rep), flush=True)
                 elif cmd == "/island":  # (debugging) where the island is and what it shows
                     print(f"[island] shown {isl.shown} size {isl.w:.0f}x{isl.h:.0f} goal {isl.goal} field hidden "
                           f"{isl.field.isHidden()} frame {isl.field.frame()} state {isl.state} hover {amb.get('hover')}",
                           flush=True)
+                elif cmd in ("/settings", "/setup"):
+                    open_window(cmd[1:])
                 elif cmd == "/ambient":
                     arg = rest.strip()
                     ui["ambient"] = (arg == "on") if arg in ("on", "off") else not ui["ambient"]
@@ -1766,6 +1901,8 @@ def run_live(args):
             # ---- self-improvement: once a day, after 10 idle minutes; its changes show as one-line notes
             if now > imp["next_check"]:
                 imp["next_check"] = now + 300
+                router.unload_if_idle(300)  # (memory: the local model reloads in ~2 s when next needed)
+                trim_gpu()
                 if (turn is None and not pending and cap is None and hold is None and now - imp["last_msg"] > 600
                         and improve.due()):
                     improve_now(quiet=True)
@@ -1803,6 +1940,8 @@ def run_live(args):
             # ---- lip-reading results
             while lip_jobs and lip_jobs[0][0].done():
                 job, mode = lip_jobs.pop(0)
+                if not lip_jobs:
+                    trim_gpu()
                 try:
                     result = job.result()
                     notice = ""
@@ -1819,7 +1958,7 @@ def run_live(args):
                                 cmd_.kind == "macctl":  # its own reading is an everyday command ("please pause")
                             hf_note("auto-used", repr(result["hyps"][0][0]))
                             run_local(cmd_, result)
-                        elif presence.plausible_request(result.get("hyps"), running_app_names()) and router.ready:
+                        elif presence.plausible_request(result.get("hyps"), running_app_names()) and router.usable:
                             hf_note("auto-to-local", repr(result["hyps"][0][0]))
                             route_async(result)  # (decided in the background: see "routed" below)
                         elif presence.plausible_request(result.get("hyps"), running_app_names()):
@@ -1941,6 +2080,14 @@ def run_live(args):
                 full = (build_message(pending, notes, mem if mem != memory_sent else "", app_state(), screen_full)
                         if screen_full != screen_block else None)
                 memory_sent = mem
+                # instant commands / shortcuts read from your lips: if this next message isn't an objection,
+                # they were right, and those clips become training data
+                if amb.get("local_clips"):
+                    said = " ".join((p.get("typed") or p.get("spoken") or "") for p in pending).lower()
+                    objected = re.match(r"\W*(no|nope|wrong|undo|stop|cancel|that's not|that wasn't|not that)\b", said)
+                    if not objected:
+                        labels.update([c for c, _ in amb["local_clips"]], only_status="heard", status="ok")
+                    amb["local_clips"] = []
                 turn = {"parts": pending, "buf": "", "in_reply": False, "heard": None, "fix": None, "reply": "",
                         "speech": "", "muted": False, "shown": False, "sent": time.monotonic(),
                         "screen": len(screen_block), "tools": 0,
