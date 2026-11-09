@@ -1,0 +1,16 @@
+# --- personal data: never commit ---
+# video clips of your face, transcripts, labels, personal memory, logs, settings, connector ids
+data/
+# test recordings and their results (your face and voice)
+recordings/
+results/
+# model weights: large, downloaded by setup.command; personal*.pth is fine-tuned on your face
+models/
+
+# --- generated / downloaded ---
+.venv/
+third_party/
+__pycache__/
+*.pyc
+.DS_Store
+screens/

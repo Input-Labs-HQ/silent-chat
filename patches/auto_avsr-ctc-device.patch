@@ -1,0 +1,18 @@
+diff --git a/espnet/nets/ctc_prefix_score.py b/espnet/nets/ctc_prefix_score.py
+index ea30ae6..378a274 100644
+--- a/espnet/nets/ctc_prefix_score.py
++++ b/espnet/nets/ctc_prefix_score.py
+@@ -36,11 +36,8 @@ class CTCPrefixScoreTH(object):
+         self.input_length = x.size(1)
+         self.odim = x.size(2)
+         self.dtype = x.dtype
+-        self.device = (
+-            torch.device("cuda:%d" % x.get_device())
+-            if x.is_cuda
+-            else torch.device("cpu")
+-        )
++        # silent-speech patch: use the input's device (cuda, mps or cpu) instead of cuda-or-cpu only
++        self.device = x.device
+         # Pad the rest of posteriors in the batch
+         # TODO(takaaki-hori): need a better way without for-loops
+         for i, l in enumerate(xlens):

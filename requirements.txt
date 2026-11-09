@@ -1,0 +1,14 @@
+gdown==6.5.1
+mediapipe==1.2.2
+mlx-whisper==0.4.3
+mlx==0.32.4
+numpy==2.4.6
+opencv-contrib-python==5.0.0.93
+pyobjc-framework-ApplicationServices==13.0
+pyobjc-framework-Quartz==13.0
+scikit-image==0.26.0
+scipy==1.17.1
+sentencepiece==0.2.3
+sounddevice==0.5.6
+torch==2.15.0
+torchvision==0.29.2

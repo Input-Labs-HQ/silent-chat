@@ -1,0 +1,27 @@
+# One sentence per line. Lines starting with # are ignored.
+# Numbers are spelled out; the scorer also spells out the digits the model sometimes outputs ("730" -> "seven thirty").
+What's the weather going to be like tomorrow
+Set a timer for ten minutes
+Remind me to call my mother tonight
+What time is my first meeting today
+Send a message to Sarah saying I'm running late
+Play some relaxing music
+How long will it take to drive to work
+Add milk and eggs to my shopping list
+What's the capital of Australia
+Turn off the lights in the living room
+Read me my latest emails
+Schedule lunch with Tom on Friday at noon
+How many calories are in a banana
+Translate thank you very much into Spanish
+What's in the news this morning
+Wake me up at seven thirty tomorrow
+Find a good Italian restaurant nearby
+Summarize this article for me
+What do I have planned for the weekend
+Call the dentist and book an appointment
+How do you spell necessary
+Pause the music
+Convert fifty dollars to euros
+Tell me a joke
+Open my notes and start a new list
