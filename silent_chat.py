@@ -140,7 +140,10 @@ MAC_CONTROL = (
     "WebSearch for its open.spotify.com link), then play that; play/pause/next already report what's playing. This all "
     "happens in the background: don't open or focus Spotify, and don't use 'spotify search' (it brings Spotify to the "
     "front) unless they ask to see results. "
-    "Quote app names that contain spaces. If the request is unclear or might be a misreading, ask before acting. "
+    "Quote app names that contain spaces. For harmless, easily undone actions (playing or pausing music, opening an "
+    "app or page, searching, scrolling) just do the most likely reading; don't ask to confirm, they can say stop. "
+    "Ask first only when it's genuinely unclear what they want, or before anything that sends, deletes, buys or "
+    "can't be undone. "
     "Write the HEARD line once, at the very start (never again after using a tool)."
 )
 LIVE_SYSTEM = (
@@ -1951,7 +1954,14 @@ def run_live(args):
                         if settings.get("handsfree_cue") and not any(w and w[0] in CUE_WORDS for w in top):
                             hf_note("auto-no-cue", repr(result["hyps"][0][0]))
                             continue
-                        if try_closed_set(result):  # hands-free only acts on a clear instant command or shortcut
+                        if now - ui["question_at"] < 25 and turn is None and not ui.get("confirm"):
+                            # Claude just asked you something: this is most likely your answer, so it goes back
+                            # to Claude as is (it has the context to tell an answer from chatter)
+                            hf_note("auto-answer", repr(result["hyps"][0][0]))
+                            result["handsfree"] = True
+                            notes.append("(Hands-free, right after your question: probably their answer to it.)")
+                            pending.append(result)
+                        elif try_closed_set(result):  # hands-free only acts on a clear instant command or shortcut
                             hf_note("auto-used", repr(result["hyps"][0][0]))
                             amb["hf_gain"] = max(1.0, amb["hf_gain"] * 0.98)
                         elif (cmd_ := local_commands.parse_part(result, typer.frontmost()[0])) and \

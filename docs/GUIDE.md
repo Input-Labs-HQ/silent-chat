@@ -243,6 +243,9 @@ and then:
    * **hands it to Claude** with the fixed words ("please write up on Spotify" → "play rap on Spotify"). Claude can
      still answer IGNORE, and then it's struck through.
    Closing or pressing anything always goes to Claude, so a misread can't close your work.
+**Right after Claude asks you something**, the next thing you mouth is taken as your answer and goes straight back
+to Claude (it has the context), skipping the filters. Claude also no longer asks you to confirm harmless things
+like playing music or opening an app; it does the most likely reading, and you can say stop.
 Each false start makes hands-free about 5% harder to set off, up to +60%, and each real use eases it back. It
 also learns where "facing the screen" is for you: after 8 deliberate starts (Option or a long blink) it only starts
 by itself when your head is within about 10° of how you usually hold it then. (A fixed cutoff looked perfect on the
