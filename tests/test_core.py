@@ -42,6 +42,22 @@ class InstantCommands(unittest.TestCase):
         self.assertEqual(local_commands.parse_part(part).args, ["spotify", "pause"])
 
 
+class DictateOrRequest(unittest.TestCase):
+    """Holding Option types what you say, unless it's a request for Claude."""
+
+    def test_requests(self):
+        for t in ["This does work very well. Message Marianne on Discord that this works very well.",
+                  "open Spotify", "hey Claude, what is the weather", "can you play some rap",
+                  "text Alex that I am running late"]:
+            self.assertTrue(local_commands.is_request(t), t)
+
+    def test_dictation(self):
+        for t in ["I will send you the file tomorrow", "sounds good, see you at 4", "Tell me when you get there",
+                  "what time works for you?", "Let me know if you can message me later",
+                  "I told Sam about it on Discord"]:
+            self.assertFalse(local_commands.is_request(t), t)
+
+
 class HandsFreeFilter(unittest.TestCase):
     apps = ["Spotify", "Discord", "Google Chrome"]
 

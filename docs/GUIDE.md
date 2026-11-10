@@ -45,6 +45,10 @@ waveform; let go and the text is typed where your cursor is.
 * Taps and Option shortcuts (Option+arrow, Option+letter …) are ignored: a hold only counts if it's longer than
   0.5 s, no other key was pressed, and it heard speech or saw mouthing.
 * With the overlay showing, Option works as before (chat, or TYPE mode). `--no-hold-dictation` turns this off.
+* **Unless it's a request.** If what you say is clearly for Claude, such as "message Marianne on Discord that this
+  works", "open Spotify", "play some rap" or anything starting with "Hey Claude", it goes to Claude instead of being
+  typed. Ordinary sentences ("sounds good, see you at 4", "tell me when you get there") are still typed.
+* Claude is told what you dictated with your next message, so "why didn't you do that?" makes sense to it.
 
 **Todoist and Spotify, directly.** Silent chat uses the Todoist and Spotify connectors from your claude.ai account
 (claude.ai > Settings > Connectors), so Claude reads and changes your tasks and searches Spotify's catalogue

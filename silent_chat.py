@@ -1158,7 +1158,8 @@ def run_live(args):
         lip_jobs.append((job, "hold"))
 
     def type_now(text):
-        """Type what you said out loud straight into the app in front (no Claude round trip needed)."""
+        """Type what you said out loud straight into the app in front (no Claude round trip needed). Claude is told
+        about it with your next message, so "why didn't you do that?" makes sense to it."""
         nonlocal notice
         bundle, pid, app = typer.frontmost()
         if not typer.trusted():
@@ -1172,6 +1173,7 @@ def run_live(args):
         dictation.update(field=dictation["field"] + prefix + text, last=prefix + text, deleted=False,
                          words=dictation["words"] + len(text.split()), last_clips=[])
         conversation.append(("Typed", text))
+        amb.setdefault("dictated", []).append((app, text[:300]))
         print(f"Typed (said out loud) into {app}: {text}", flush=True)
 
     local_done = queue.Queue()
@@ -2193,6 +2195,12 @@ def run_live(args):
                         pass
                     elif mode != "hold":
                         (dictation["pending"] if mode == "type" else pending).append(result)
+                    elif result.get("spoken") and local_commands.is_request(result["spoken"]):
+                        # Option held, but it's a request for Claude ("message Marianne on Discord that ..."), not
+                        # words to type: Claude does it instead
+                        print(f"[hold] that's a request, not dictation: {result['spoken']!r}", flush=True)
+                        pending.append({"clip": None, "hyps": None, "typed": None, "spoken": result["spoken"],
+                                        "voice": True})
                     elif result.get("spoken"):
                         type_now(result["spoken"])
                     else:  # mouthed: Claude picks the right words from the lip-reader's guesses, then it's typed
@@ -2281,6 +2289,11 @@ def run_live(args):
                 mem = memory.prompt_block()
                 screen_block, screen_full = screen_now()
                 notes += notifications_note(time.monotonic())
+                if amb.get("dictated"):  # what you dictated (Option held) since your last message, for context
+                    notes.append("(Since their last message the user dictated, by holding Option, into the app in "
+                                 "front: " + "; ".join(f'into {a}: "{t}"' for a, t in amb["dictated"][-3:]) +
+                                 ". It was typed there as text, not sent to you.)")
+                    amb["dictated"] = []
                 if resume["pending"]:
                     resume["pending"] = False
                     rn = resume_note()
@@ -2658,9 +2671,10 @@ def run_live(args):
                             pass
                         improve.log("vote", said=rec.get("said"), reply=rec.get("reply"), ok="yes" if v == "up" else "no")
                         pres.poke(now, 1.5)
-                last_reply = next((t for w, t in reversed(show_lines) if w == "Claude" and t and t != "..."), None)
+                last_reply = next((x[1] for x in reversed(show_lines) if x[0] == "Claude" and x[1] and x[1] != "..."),
+                                  None)
                 if last_reply and turn is None and not amb.get("struck"):
-                    said = next((t for w, t in reversed(show_lines) if w in ("You", "Typed")), "")
+                    said = next((x[1] for x in reversed(show_lines) if x[0] in ("You", "Typed")), "")
                     if (amb.get("vote_for") or {}).get("reply") != last_reply:
                         amb["vote_for"], amb["voted"] = {"said": said, "reply": last_reply}, ""
                     votable = amb.get("voted", "")

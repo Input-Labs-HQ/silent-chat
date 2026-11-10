@@ -167,6 +167,23 @@ def parse(text, front_bundle=""):
     return None
 
 
+REQUEST_START = re.compile(  # commands to the computer itself (not things you'd say to a person in a chat)
+    r"^\W*(?:please\s+|can you\s+|could you\s+)?"
+    r"(?:open|launch|quit|play|pause|skip|search(?: for)?|google|look up|remind me|schedule|"
+    r"turn (?:on|off|up|down)|switch to)\b", re.I)
+WAKE = re.compile(r"^\W*(?:hey,?\s+)?claude\b", re.I)  # "Hey Claude, ..." / "Claude, ...": always for Claude
+REQUEST_ANYWHERE = re.compile(  # "... message Marianne on Discord that ..." (a capitalised name, then where or what)
+    r"\b(?i:message|text|dm|email|reply to|send a message to)\s+[A-Z][\w'-]+(?:\s+[A-Z][\w'-]+)?"
+    r"\s+(?i:on|in|via|that|saying|to say|about)\b")
+
+
+def is_request(text):
+    """Something said while dictating that's really a request for Claude, not words to type
+    ("message Marianne on Discord that this works", "open Spotify", "hey Claude, what's ...")."""
+    t = (text or "").strip()
+    return bool(WAKE.search(t) or REQUEST_START.search(t) or REQUEST_ANYWHERE.search(t))
+
+
 def parse_part(part, front_bundle=""):
     """A message part (typed / said out loud / lip-reader n-best) -> Command, only if it's clearly one."""
     if part.get("typed") or part.get("spoken"):
