@@ -2617,11 +2617,31 @@ def run_live(args):
                 while not esc_q.empty():  # Esc: dismiss now (and forget the hover / history state)
                     esc_q.get()
                     pres.show_until, amb["hover"], amb["history_open"] = 0.0, False, False
+                    amb["gaze_peek"], amb["peek_lock"] = False, True
                     if ui.get("practice"):
                         ui["practice"] = None
                         conversation.append(("Notification", "Practice stopped."))
                     amb["dismissed_at"], isl.max_text = now, 220.0
                     isl.unfocus()
+                # looking up at the notch for a moment brings the recent conversation back (to re-read a reply that
+                # tucked away too soon); looking away for a bit lets it go again. (Generous: gaze is only ~80 pt.)
+                at_top = (gp is not None and abs(gp[0] - (ix + iw / 2)) <= max(iw / 2 + 120, 240)
+                          and gp[1] <= iy + ih + 60)
+                if at_top and not amb.get("peek_lock"):
+                    amb["peek_out"] = None
+                    amb["peek_in"] = amb.get("peek_in") or now
+                else:
+                    amb["peek_in"] = None
+                    amb["peek_out"] = amb.get("peek_out") or now
+                    if not at_top:
+                        amb["peek_lock"] = False  # (after Esc: look away once, then looking up works again)
+                if (amb.get("peek_in") and now - amb["peek_in"] > 0.45 and now - amb.get("dismissed_at", 0) > 1.0
+                        and (amb.get("history") or conversation)):
+                    if not amb.get("gaze_peek"):
+                        print("[island] you looked up at it: showing the conversation", flush=True)
+                    amb["gaze_peek"] = True
+                elif amb.get("gaze_peek") and amb.get("peek_out") and now - amb["peek_out"] > 1.5:
+                    amb["gaze_peek"] = False
                 if amb.get("hover_in") and now - amb["hover_in"] > 0.15 and now - amb.get("dismissed_at", 0) > 1.0:
                     amb["hover"] = True  # (the text box takes the keyboard only when you click it, never by itself)
                 elif amb.get("hover") and amb.get("hover_out") and now - amb["hover_out"] > 0.6 and not isl.has_text():
@@ -2631,7 +2651,8 @@ def run_live(args):
                 struck_live = bool(amb.get("struck")) and now - amb["struck"][1] < 1.6
                 deciding = bool(amb.get("deciding")) and now - amb["deciding"][1] < 5
                 vis = pres.visible(now, busy or ind is not None or struck_live or deciding,
-                                   ui["pinned"] or amb.get("hover", False) or amb.get("history_open", False),
+                                   ui["pinned"] or amb.get("hover", False) or amb.get("history_open", False)
+                                   or amb.get("gaze_peek", False),
                                    on_panel)
                 if amb.get("struck") and not struck_live and not busy:
                     amb["struck"] = None
@@ -2640,7 +2661,7 @@ def run_live(args):
                 want_field = ui["pinned"] or amb.get("hover", False) or (vis and ((amb["noface_since"] is not None and now - amb["noface_since"] > 1.5)
                                                        or now - amb["read_failed"] < 20
                                                        or (not ui["mic"] and not wake.enabled)))
-                open_up = amb.get("hover") or amb.get("history_open")
+                open_up = amb.get("hover") or amb.get("history_open") or amb.get("gaze_peek")
                 lines = [(w, t) for w, t in (amb.get("history", []) + conversation if open_up else conversation)
                          [-(12 if amb.get("history_open") else 6 if open_up else 3):] if t and t != "..."]
                 if turn is not None and turn.get("handsfree"):  # (until Claude decides it's for it)

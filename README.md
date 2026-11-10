@@ -99,6 +99,7 @@ to turn the camera on.
 | Hold <kbd>⌥</kbd> and mouth or speak | Talk to Claude, or dictate into the app in front |
 | Say “Hey Claude, …” | Talk out loud |
 | Hover over the notch | See the conversation and type |
+| Look up at the notch | See the conversation again |
 | Click the island · press Esc | More history · put it away |
 | Long blink · smile · raise eyebrows | Listen · delete a word · Enter |
 | Nod · shake your head | Yes · no, when Claude asks |

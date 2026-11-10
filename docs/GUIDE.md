@@ -220,6 +220,9 @@ eyes are on it), and fades out. The next time it starts fresh; Claude still reme
 * **Hover over the island (or the bare notch) to type.** The chat drops down with your recent conversation and a
   text box. Click the box, type, and press Return. It closes when the mouse leaves, unless the box has text in it.
   It never takes the keyboard by itself.
+* **Look up at the notch to see it again.** If a reply tucked away before you finished it, look at the top middle of
+  the screen for about half a second (camera and gaze on): the island drops down with your recent conversation, and
+  goes away a second or two after you look elsewhere. Esc closes it; look away once and it works again.
 * **\\ turns the camera on or off.** With the camera off, replies and notifications still show in the island.
 * Hiding silent chat from the menu still turns the camera off; replies and notifications still pop up and fade.
 * AUTO-HIDE in the menu bar, or `/ambient on|off`, switches it. Off, the panel stays up as before.
