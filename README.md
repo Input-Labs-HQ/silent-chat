@@ -82,7 +82,7 @@ Needs an Apple Silicon Mac (macOS 14+), [Claude Code](https://claude.com/claude-
 and `brew install uv ffmpeg`.
 
 ```bash
-git clone https://github.com/justbenzo/silent-chat && cd silent-chat && ./setup.command
+git clone https://github.com/Input-Labs-HQ/silent-chat && cd silent-chat && ./setup.command
 ```
 
 Setup downloads the models (~2.5 GB) and puts **Silent Chat** in your menu bar, opening at login. The small local
