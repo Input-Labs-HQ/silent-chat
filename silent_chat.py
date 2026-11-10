@@ -2624,9 +2624,10 @@ def run_live(args):
                     amb["dismissed_at"], isl.max_text = now, 220.0
                     isl.unfocus()
                 # looking up at the notch for a moment brings the recent conversation back (to re-read a reply that
-                # tucked away too soon); looking away for a bit lets it go again. (Generous: gaze is only ~80 pt.)
-                at_top = (gp is not None and abs(gp[0] - (ix + iw / 2)) <= max(iw / 2 + 120, 240)
-                          and gp[1] <= iy + ih + 60)
+                # tucked away too soon); looking away for a bit lets it go again. Only a steady stare right at the
+                # notch counts (a glance at tabs or the menu bar doesn't).
+                at_top = (gp is not None and abs(gp[0] - (ix + iw / 2)) <= min(iw / 2 + 40, 160)
+                          and gp[1] <= iy + ih + 15)
                 if at_top and not amb.get("peek_lock"):
                     amb["peek_out"] = None
                     amb["peek_in"] = amb.get("peek_in") or now
@@ -2635,7 +2636,7 @@ def run_live(args):
                     amb["peek_out"] = amb.get("peek_out") or now
                     if not at_top:
                         amb["peek_lock"] = False  # (after Esc: look away once, then looking up works again)
-                if (amb.get("peek_in") and now - amb["peek_in"] > 0.45 and now - amb.get("dismissed_at", 0) > 1.0
+                if (amb.get("peek_in") and now - amb["peek_in"] > 1.0 and now - amb.get("dismissed_at", 0) > 1.0
                         and (amb.get("history") or conversation)):
                     if not amb.get("gaze_peek"):
                         print("[island] you looked up at it: showing the conversation", flush=True)
