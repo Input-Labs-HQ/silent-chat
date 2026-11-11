@@ -8,6 +8,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+import consequence  # noqa: E402
+import gaze  # noqa: E402
 import gaze_click  # noqa: E402
 import local_commands  # noqa: E402
 import presence  # noqa: E402
@@ -98,6 +100,101 @@ class GazeClick(unittest.TestCase):
         self.assertTrue(gaze_click.risky({"label": "Delete conversation"}))
         self.assertFalse(gaze_click.risky({"label": "Sender details"}))
         self.assertFalse(gaze_click.risky({"label": "Open"}))
+
+
+class GazeScreens(unittest.TestCase):
+    """Several screens, and dim light."""
+
+    def test_off_screen(self):
+        q = (0, 0, 100, 50)
+        self.assertEqual(gaze._off_screen((50, 25), q), 0.0)
+        self.assertAlmostEqual(gaze._off_screen((130, 90), q), 50.0)
+
+    def test_external_screen_head_terms(self):
+        ext = gaze.SelfCalibration({"screen": [0, 0, 1920, 1080], "display": 4, "mm_per_pt": 0.31,
+                                    "cam": [953, 1096], "builtin": False})
+        lap = gaze.SelfCalibration({"screen": [197, 1080, 1512, 982], "display": 1, "mm_per_pt": 0.2,
+                                    "cam": [953, 1096], "builtin": True})
+        for k, v in gaze.EXTERNAL_HEAD.items():
+            self.assertEqual(ext.fast.w[k], v)
+        self.assertEqual(lap.fast.w[13], gaze.PRIOR_MEAN[13])
+
+    def test_brighten_only_in_the_dark(self):
+        import numpy as np
+        b = gaze.Brighten()
+        lm = np.zeros((478, 3))
+        lm[gaze.Brighten.EYES, 0] = np.linspace(40, 80, 10)
+        lm[gaze.Brighten.EYES, 1] = np.linspace(40, 60, 10)
+        dark = np.full((120, 160, 3), 12, np.uint8)
+        dark[50, 50] = 200
+        self.assertFalse(np.array_equal(b(dark, lm), dark))
+        self.assertTrue(b.on)
+        bright = np.full((120, 160, 3), 150, np.uint8)
+        b2 = gaze.Brighten()
+        self.assertTrue(np.array_equal(b2(bright, lm), bright))
+        self.assertFalse(b2.on)
+
+
+class NodToConfirm(unittest.TestCase):
+    """Consequential actions ask for a nod first (consequence.py)."""
+
+    hf = {"how": "handsfree", "hyps": [("NEXT", -1.0), ("SO", -5.0)]}
+
+    def test_handsfree_audio_asks(self):
+        for args in (["spotify", "next"], ["spotify", "play"], ["spotify", "volume", "100"], ["open", "Spotify"]):
+            self.assertEqual(consequence.assess("macctl", args, self.hf)[0], "ask", args)
+        self.assertEqual(consequence.assess("macctl", ["spotify", "next"], self.hf)[1], "Skip to the next song?")
+
+    def test_harmless_runs(self):
+        for args in (["spotify", "pause"], ["spotify", "volume", "down"], ["scroll", "down"]):
+            self.assertEqual(consequence.assess("macctl", args, self.hf)[0], "run", args)
+        self.assertEqual(consequence.assess("action", "hide", self.hf)[0], "run")
+
+    def test_deliberate_and_sure_runs(self):
+        sure = {"hyps": [("NEXT SONG", -0.5), ("NEXT", -6.0)]}
+        close = {"hyps": [("NEXT SONG", -0.5), ("NEW SONG", -1.2)]}
+        self.assertEqual(consequence.assess("macctl", ["spotify", "next"], sure)[0], "run")
+        self.assertEqual(consequence.assess("macctl", ["spotify", "next"], close)[0], "ask")
+        self.assertEqual(consequence.assess("macctl", ["spotify", "next"], {"typed": "next"})[0], "run")
+        self.assertEqual(consequence.assess("shortcut", [], {"spoken": "send it"}, "reply", sends=True)[0], "ask")
+
+    def test_margin_skips_same_reading(self):
+        self.assertAlmostEqual(consequence.margin([("NEXT", -1.0), ("NEXT", -1.5), ("SO", -4.0)]), 3.0)
+
+    def _nod(self, prompt, t0, amp, period=0.5, secs=1.5, fps=30):
+        import math
+        for i in range(int(secs * fps)):
+            t = t0 + i / fps
+            prompt.motion.add(t, amp * math.sin(2 * math.pi * (t - t0) / period), 0.0)
+        return prompt.step(t0 + secs)
+
+    def test_nod_confirms_shake_cancels_silence_times_out(self):
+        m = consequence.Motion()
+        p = consequence.NodPrompt(10.0, m, camera=False)
+        self.assertEqual(self._nod(p, 10.3, 6.0), "nod")
+        m2 = consequence.Motion()
+        p2 = consequence.NodPrompt(10.0, m2, camera=False)
+        import math
+        for i in range(45):
+            t = 10.3 + i / 30
+            m2.add(t, 0.0, 7.0 * math.sin(2 * math.pi * (t - 10.3) / 0.5))
+        self.assertEqual(p2.step(11.8), "shake")
+        self.assertEqual(consequence.NodPrompt(10.0, consequence.Motion(), camera=False).step(14.5), "timeout")
+
+    def test_bobbing_to_music_is_not_a_nod(self):
+        import math
+        m = consequence.Motion()
+        for i in range(90):  # 3 s of bobbing (+-4 deg) before the question
+            t = 7.0 + i / 30
+            m.add(t, 4.0 * math.sin(2 * math.pi * t / 0.5), 0.0)
+        p = consequence.NodPrompt(10.0, m, camera=False)
+        self.assertIsNone(self._nod(p, 10.3, 4.0))  # the same bobbing carries on: not a yes
+        m2 = consequence.Motion()
+        p2 = consequence.NodPrompt(10.0, m2, camera=False)
+        for i in range(30):  # a nod made just before the question doesn't count either
+            t = 9.0 + i / 30
+            m2.add(t, 6.0 * math.sin(2 * math.pi * (t - 9.0) / 0.5), 0.0)
+        self.assertIsNone(p2.step(10.6))
 
 
 class HandsFreeFilter(unittest.TestCase):

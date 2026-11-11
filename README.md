@@ -100,14 +100,14 @@ to turn the camera on.
 | Say “Hey Claude, …” | Talk out loud |
 | Hover over the notch | See the conversation and type |
 | Look up at the notch | See the conversation again |
-| Tap Right ⌘ | Click what you're looking at |
+| Tap Right ⌘ | Click what you're looking at (a faint glass sheen shows what) |
 | Click the island · press Esc | More history · put it away |
 | Long blink · smile · raise eyebrows | Listen · delete a word · Enter |
-| Nod · shake your head | Yes · no, when Claude asks |
+| Nod · shake your head | Yes · no, when Claude asks, and before music, opening things or sending |
 | Tap <kbd>\\</kbd> while Claude is working | Stop it |
 | Menu bar > Settings… | Every switch in one place |
 
-<p align="center"><img src="docs/settings.png" width="420" alt="The Settings window: switches for hands-free, Hey Claude, spoken replies, the notch, screen and gaze awareness, the glass lens, notifications, self-improvement, face gestures and learning gaze as you work, plus the Claude model and buttons to practise, recalibrate gaze and show stats"></p>
+<p align="center"><img src="docs/settings.png" width="420" alt="The Settings window: switches for hands-free, Hey Claude, spoken replies, the notch, screen and gaze awareness, the glass lens, notifications, self-improvement, face gestures and learning gaze as you work, nod to confirm, the Right ⌘ click and its glass highlight, plus the Claude model and buttons to practise, recalibrate gaze and show stats"></p>
 
 ## Privacy
 

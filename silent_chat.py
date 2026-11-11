@@ -43,6 +43,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 
+import consequence
 import gaze_click
 import local_commands
 import improve
@@ -206,6 +207,8 @@ GESTURE_COOLDOWN = 1.0                                  # no gestures right afte
 # Hands-free start: lips moving while you face the screen
 HF_HOLD, HF_MIN, HF_COOLDOWN = 0.35, 0.7, 1.5  # mouthing this long starts it; shorter captures are dropped
 HF_YAW, HF_PITCH = 25, (-30, 20)               # facing the screen (head pose, degrees)
+HF_SURE = 1.5  # hands-free: the lip-reader's first guess must lead the next different one by this much (log-prob)
+# to count as a command (the short "NEXT" kept winning by a hair over chatter: 'NEXT' -6.0 vs "SO I'M GOING TO" -6.1)
 CUE_WORDS = {"claude", "cloud", "clod", "clawed", "hey"}
 # Instant commands by closed-set lip-reading (see eval_commands.py for how these were measured)
 CLOSED_MARGIN, CLOSED_GAP = 2.0, 2.0  # eval (personal, held-out, short clips): 41% instant & right, 3% wrong, 3% false accepts
@@ -557,8 +560,12 @@ def run_live(args):
     import headmotion
     nod_airpods, nod_camera = headmotion.NodShake(), headmotion.NodShake.for_camera()
     airpods = headmotion.AirPodsMotion(DATA / "motion.fifo") if settings.get("airpods_motion", True) else None
+    gate_motion = {"camera": consequence.Motion(), "AirPods": consequence.Motion()}  # (for nod-to-confirm)
     if airpods is not None:
-        airpods.on_sample = nod_airpods.add
+        def _on_airpods(t, p, y):
+            nod_airpods.add(t, p, y)
+            gate_motion["AirPods"].add(t, p, y)
+        airpods.on_sample = _on_airpods
     ui["question_at"], ui["nod_quiet_until"] = -99.0, 0.0
     # what's on screen goes with each message (control.context), built while the lip-reader is still working
     import control
@@ -582,6 +589,7 @@ def run_live(args):
     import gaze as gaze_mod
     import gaze_passive
     gazer = gaze_mod.Gaze(DATA / "gaze.json")
+    brighten = gaze_mod.Brighten()  # (dim light: more contrast for the face tracker)
     teacher = gaze_passive.Teacher(caret=gaze_passive.caret_rect)
     pop_ups = gaze_passive.WindowWatch(skip=lambda: not (ui["open"] and gazer.learning))  # small windows coming up
     ui["gaze"] = settings.get("gaze", True)
@@ -751,6 +759,9 @@ def run_live(args):
     isl = island.Island(on_text=sent_from_box, on_control=spotify_control, on_tap=island_tap)
 
     gclick_ring = gaze_click.Ring()
+    gaze_click.SKIP_PIDS.update({os.getpid(), os.getppid()})
+    gglass = gaze_click.Highlighter(  # faint glass on what Right Command would press
+        blocked=lambda app, pid: bool(privacy.blocked(app, gaze_click.window_title(pid))))
 
     def gaze_tap(t, now):
         """Right Command was tapped at t: find what you're looking at and click it (risky ones need a second tap
@@ -758,6 +769,17 @@ def run_live(args):
         pending = amb.get("gclick")
         if pending and not pending.get("at") and now - pending["t"] < 2.0:  # second tap: confirmed
             pending["at"] = now
+            return None
+        shown = gglass.current() if settings.get("gaze_glass", True) else None
+        if shown is not None:  # what the glass is on is exactly what gets pressed
+            c = {**shown, "t": now}
+            if gaze_click.risky(c):
+                gclick_ring.show(c["rect"], risky_=True)
+                amb["gclick"] = c
+                return f"Tap Right Command again to click “{c['label']}”."
+            gclick_ring.show(c["rect"])
+            c["at"] = now + 0.12
+            amb["gclick"] = c
             return None
         if not (gazer.ready and ui["gaze"]):
             return "Gaze is off: turn the camera on to click by looking."
@@ -1126,7 +1148,8 @@ def run_live(args):
                 "ambient": ui["ambient"], "gaze": ui["gaze"], "warp": ui["warp"],
                 "improve": improve.load().get("enabled", True), "clips": SAVE_CLIPS[0],
                 "remember": settings.get("remember", True), "clicks": gazer.learning,
-                "nudges": settings.get("nudges", False), "gclick": settings.get("gaze_click", True)}
+                "nudges": settings.get("nudges", False), "gclick": settings.get("gaze_click", True),
+                "gglass": settings.get("gaze_glass", True), "gate": settings.get("gate", True), "peek": settings.get("gaze_peek", True)}
     menu = StatusMenu(typed.put, settings_state, args.toggle_key)
     import settings_window
 
@@ -1282,12 +1305,69 @@ def run_live(args):
               f"{c['second']:.1f}, free reading {c['free']:.1f}; {c['n']} candidates in {c['ms']} ms)", flush=True)
         return True
 
+    def heard_of(part):
+        return part.get("typed") or part.get("spoken") or (part.get("hyps") or [("", 0)])[0][0]
+
+    def gated(kind, args, part, go, label="", sends=False):
+        """Every local action comes through here: run it now, or ask for a nod first (consequence.py)."""
+        if not settings.get("gate", True):
+            return go()
+        decision, question = consequence.assess(kind, args, part, label, sends)
+        how = consequence.how_started(part)
+        consequence.log("decision", kind=kind, args=list(args) if isinstance(args, (list, tuple)) else args,
+                        label=label, how=how, margin=round(consequence.margin(part.get("hyps")), 2),
+                        heard=heard_of(part), decision=decision)
+        if decision == "run":
+            return go()
+        now = time.monotonic()
+        if ui.get("gate"):
+            gate_end("replaced", now)
+        on_airpods = airpods is not None and airpods.active()
+        line = ("Claude", f"{question} Nod to confirm.")
+        conversation.extend([("You", heard_of(part)), line])
+        ui["gate"] = {"go": go, "part": part, "line": line, "question": question, "how": how, "kind": kind,
+                      "prompt": consequence.NodPrompt(now, gate_motion["AirPods" if on_airpods else "camera"],
+                                                      camera=not on_airpods),
+                      "source": "AirPods" if on_airpods else "camera"}
+        pres.poke(now, 5)
+        print(f"[gate] asking ({how}): {question}", flush=True)
+
+    def gate_end(outcome, now):
+        """The waiting question got an answer (nod) or didn't (shake, timeout, looked away, Esc, replaced)."""
+        g, ui["gate"] = ui.get("gate"), None
+        if not g:
+            return
+        consequence.log("answer", outcome=outcome, question=g["question"], how=g["how"], source=g["source"],
+                        waited=round(now - g["prompt"].t0, 2), bob=[round(v, 1) for v in g["prompt"].bob])
+        print(f"[gate] {g['question']} -> {outcome} ({g['source']})", flush=True)
+        for i in range(len(conversation) - 1, -1, -1):
+            if conversation[i] is g["line"]:
+                if outcome == "nod":
+                    del conversation[i - 1:i + 1]  # (the action shows its own lines)
+                else:
+                    conversation[i] = ("Claude", "Okay, not doing that.")
+                break
+        part = g["part"]
+        if outcome == "nod":
+            part["nodded"] = True
+            g["go"]()
+        elif part.get("clip") and part.get("hyps"):  # it wasn't that: never train the lip-reader on it
+            labels.add(part["clip"], heard_of(part), "rejected", "gate", part["hyps"])
+
     def run_local(cmd, part):
+        gated(cmd.kind, cmd.args, part, lambda: run_local_now(cmd, part))
+
+    def run_local_now(cmd, part):
         """Carry out an everyday command without Claude (local_commands.py); the result shows up via local_done."""
-        heard = part.get("typed") or part.get("spoken") or part["hyps"][0][0]
+        heard = heard_of(part)
         if part.get("clip") and part.get("hyps"):
-            labels.add(part["clip"], heard, "heard", "local", part["hyps"])  # still training data
-            amb.setdefault("local_clips", []).append((part["clip"], time.monotonic()))
+            if part.get("nodded"):  # you nodded to it: a sure label
+                labels.add(part["clip"], heard, "confirmed", "local", part["hyps"])
+            elif consequence.how_started(part) == "handsfree":  # unasked-for: kept, but never trained on
+                labels.add(part["clip"], heard, "doubtful", "local", part["hyps"])
+            else:
+                labels.add(part["clip"], heard, "heard", "local", part["hyps"])  # still training data
+                amb.setdefault("local_clips", []).append((part["clip"], time.monotonic()))
         conversation.extend([("You", heard), ("Claude", "...")])
         stop_file.unlink(missing_ok=True)
         speak = bool(cmd.say) and (speaker.enabled or bool(part.get("voice")))
@@ -1308,8 +1388,14 @@ def run_live(args):
         threading.Thread(target=go, daemon=True).start()
 
     def replay(shortcut, values, part):
+        steps_ = shortcuts.fill(shortcut["steps"], values)
+        sends = any(st.startswith("ask:") or "key return" in st or st.startswith("press") for st in steps_)
+        gated("shortcut", steps_, part, lambda: replay_now(shortcut, values, part), label=shortcut["phrase"],
+              sends=sends)
+
+    def replay_now(shortcut, values, part):
         """Run a saved shortcut on the Mac. Steps marked ask: wait for a yes; if a step fails, Claude takes over."""
-        heard = part.get("typed") or part.get("spoken") or part["hyps"][0][0]
+        heard = heard_of(part)
         steps = shortcuts.fill(shortcut["steps"], values)
         ask = next((i for i, st in enumerate(steps) if st.startswith("ask:")), None)
         now_steps, later = (steps, []) if ask is None else (steps[:ask], [steps[ask][4:]] + steps[ask + 1:])
@@ -1671,6 +1757,7 @@ def run_live(args):
             for t_tap in (toggle.rcmd.take() if toggle else []):
                 if settings.get("gaze_click", True):
                     notice = gaze_tap(t_tap, now) or notice
+            gglass.tick()
             gc = amb.get("gclick")
             if gc and gc.get("at") and now >= gc["at"]:
                 amb["gclick"] = None
@@ -1726,9 +1813,13 @@ def run_live(args):
             if (ui["open"] or hold is not None) and cam.cap is not None:
                 frame = cam._read()
                 now = time.monotonic()
-                level = activity(np.ascontiguousarray(frame[..., ::-1]), now)
+                seen = brighten(frame, activity.landmarks) if settings.get("gaze_brighten", True) else frame
+                level = activity(np.ascontiguousarray(seen[..., ::-1]), now)
                 gazer.update(now, activity.landmarks, activity.matrix, activity.blend,
                              airpods.latest() if airpods is not None else None)
+                gglass.update(gazer.point(now - 0.3, now),
+                              gazer.radius, settings.get("gaze_glass", True) and settings.get("gaze_click", True)
+                              and ui["gaze"] and gazer.warm and ui.get("gcheck") is None and gazer.calib is None)
                 # gaze teaches itself from the moments it can guess where you're looking (gaze_passive.py)
                 while not clicks_q.empty():
                     teacher.click(*clicks_q.get())
@@ -1747,6 +1838,10 @@ def run_live(args):
                     note = gazer.learn(hint)
                     if note:
                         print("[gaze] " + note, flush=True)
+                if ui.get("gcheck") is not None and not ui["gcheck"].step(now, frame, activity.landmarks):
+                    notice = "Gaze check: " + ui["gcheck"].done
+                    print(f"[gaze] check ({ui['gcheck'].dir.name}): {ui['gcheck'].done}", flush=True)
+                    ui["gcheck"] = None
                 if gazer.calib is not None:
                     r = gazer.step_calibration(now)
                     if r is not None:
@@ -1840,7 +1935,15 @@ def run_live(args):
             # ---- nod = yes, head shake = no, when a question is waiting (AirPods motion if they're in)
             if pose is not None and ui["open"]:
                 nod_camera.add(now, pose[1], pose[0])
-            awaiting = bool(ui.get("confirm")) or (now - ui["question_at"] < 25 and turn is None and not pending)
+                gate_motion["camera"].add(now, pose[1], pose[0])
+            if ui.get("gate"):  # a consequential action waiting for your nod (consequence.py)
+                answer_ = ui["gate"]["prompt"].step(now, face_seen=activity.landmarks is not None,
+                                                    facing=pose is None or abs(pose[0]) < 35)
+                if answer_:
+                    gate_end(answer_, now)
+                    ui["nod_quiet_until"] = now + 1.5
+            awaiting = not ui.get("gate") and (bool(ui.get("confirm")) or (now - ui["question_at"] < 25 and turn is None
+                                                                            and not pending))
             if awaiting and now > ui["nod_quiet_until"] and cap is None:
                 source = "AirPods" if airpods is not None and airpods.active() else "camera"
                 gesture_seen = (nod_airpods if source == "AirPods" else nod_camera).detect()
@@ -1969,7 +2072,17 @@ def run_live(args):
                         gazer.start_calibration()
                         notice = "Gaze calibration: look at each dot (about a minute)."
                         print("[gaze] calibrating on the screen under the mouse", flush=True)
+                elif cmd == "/gaze" and rest.strip() == "check":  # measure the error on every screen; learns nothing
+                    if not ui["open"]:
+                        notice = "Show silent chat first (tap \\): the check needs the camera."
+                    else:
+                        import gaze_check
+                        ui["gcheck"] = gaze_check.GazeCheck(gazer)
+                        notice = "Gaze check: look at each dot (9 per screen)."
                 elif cmd == "/gaze" and rest.strip() == "cancel":
+                    if ui.get("gcheck") is not None:
+                        ui["gcheck"].cancel()
+                        ui["gcheck"] = None
                     gazer.cancel_calibration()
                 elif cmd == "/gaze" and rest.strip().startswith("show"):
                     secs = float(rest.split()[1]) if len(rest.split()) > 1 else 20
@@ -2044,6 +2157,20 @@ def run_live(args):
                 elif cmd == "/gaze" and rest.strip() in ("click on", "click off"):
                     save_setting("gaze_click", rest.strip().endswith("on"))
                     notice = f"Right Command click-where-you-look {rest.split()[-1]}."
+                elif cmd == "/gaze" and rest.strip() in ("glass on", "glass off"):
+                    save_setting("gaze_glass", rest.strip().endswith("on"))
+                    if rest.strip().endswith("off"):
+                        gglass.hide()
+                    notice = f"Glass on what Right Command would press: {rest.split()[-1]}."
+                elif cmd == "/gaze" and rest.strip() in ("brighten on", "brighten off"):
+                    save_setting("gaze_brighten", rest.strip().endswith("on"))
+                    notice = f"Brighten dim frames for gaze: {rest.split()[-1]}."
+                elif cmd == "/gate" and rest.strip() in ("on", "off"):  # ask for a nod before consequential actions
+                    save_setting("gate", rest.strip() == "on")
+                    notice = f"Nod to confirm consequential actions: {rest.strip()}."
+                elif cmd == "/peek" and rest.strip() in ("on", "off"):  # looking up at the notch opens it
+                    save_setting("gaze_peek", rest.strip() == "on")
+                    notice = f"Look up at the notch to open it: {rest.strip()}."
                 elif cmd == "/nudges" and rest.strip() in ("on", "off"):
                     save_setting("nudges", rest.strip() == "on")
                     notice = f"Reply suggestions {rest.strip()}."
@@ -2127,7 +2254,11 @@ def run_live(args):
                           f"{'AirPods + camera' if gazer.head.gain != (0.0, 0.0) else 'camera'}; glass circle "
                           + (("showing" if gazer.lens.shown else "hidden") + (
                               f", bend {gazer.lens.warper.frames} frames, {gazer.lens.warper.busy * 1000:.0f} ms each"
-                              if gazer.lens.warper else ", no bend") if gazer.lens else "off"), flush=True)
+                              if gazer.lens.warper else ", no bend") if gazer.lens else "off")
+                          + f"; screen {gazer.cal.geom.get('display') if gazer.cal else '-'}"
+                          + f"; dim-light boost {'on' if brighten.on else 'off'} (eyes {brighten.light or 0:.0f}/255)"
+                          + f"; target glass {'on ' + repr((gglass.current() or {}).get('label', '')) if gglass.current() else 'none'}"
+                          f" ({gglass.lookups} lookups)", flush=True)
                 elif cmd == "/usage":
                     print("[usage] " + usage_stats(usage_log), flush=True)
                 elif cmd == "/model" and rest.strip() in ("auto", "haiku", "sonnet", "opus"):
@@ -2238,6 +2369,7 @@ def run_live(args):
                     notice = ""
                     if mode.startswith("auto:"):
                         mode = mode[5:]
+                        result["how"] = "handsfree"  # (nobody pressed anything: consequential actions ask first)
                         top = [h[0].lower().split()[:1] for h in (result.get("hyps") or [])[:3]]
                         if settings.get("handsfree_cue") and not any(w and w[0] in CUE_WORDS for w in top):
                             hf_note("auto-no-cue", repr(result["hyps"][0][0]))
@@ -2253,7 +2385,8 @@ def run_live(args):
                             hf_note("auto-used", repr(result["hyps"][0][0]))
                             amb["hf_gain"] = max(1.0, amb["hf_gain"] * 0.98)
                         elif (cmd_ := local_commands.parse_part(result, typer.frontmost()[0])) and \
-                                cmd_.kind == "macctl":  # its own reading is an everyday command ("please pause")
+                                cmd_.kind == "macctl" and consequence.margin(result.get("hyps")) >= HF_SURE:
+                            # its own reading is an everyday command ("please pause"), and clearly so
                             hf_note("auto-used", repr(result["hyps"][0][0]))
                             run_local(cmd_, result)
                         elif presence.plausible_request(result.get("hyps"), running_app_names()) and router.usable:
@@ -2315,7 +2448,7 @@ def run_live(args):
                     say = {"pause": "Paused.", "next": "Skipped.", "previous": "Back one."}.get(
                         d["cmd"][1] if d["cmd"][0] == "spotify" else "", "Done.")
                     run_local(local_commands.Command("macctl", d["cmd"], say),
-                              {"typed": d["text"], "clip": None, "hyps": result.get("hyps")})  # (an unchecked guess:
+                              {"typed": d["text"], "clip": None, "hyps": result.get("hyps"), "how": "handsfree"})  # (an unchecked guess:
                     # not saved as lip-reading training data)
                 else:  # a real request that needs Claude: with the words the local model fixed
                     result["handsfree"] = True
@@ -2699,6 +2832,8 @@ def run_live(args):
                     amb["hover_out"] = amb.get("hover_out") or now
                 while not esc_q.empty():  # Esc: dismiss now (and forget the hover / history state)
                     esc_q.get()
+                    if ui.get("gate"):
+                        gate_end("esc", now)
                     pres.show_until, amb["hover"], amb["history_open"] = 0.0, False, False
                     amb["gaze_peek"], amb["peek_lock"] = False, True
                     if ui.get("practice"):
@@ -2711,7 +2846,7 @@ def run_live(args):
                 # notch counts (a glance at tabs or the menu bar doesn't).
                 at_top = (gp is not None and abs(gp[0] - (ix + iw / 2)) <= min(iw / 2 + 40, 160)
                           and gp[1] <= iy + ih + 15)
-                if at_top and not amb.get("peek_lock"):
+                if at_top and settings.get("gaze_peek", True) and not amb.get("peek_lock"):  # /peek on|off
                     amb["peek_out"] = None
                     amb["peek_in"] = amb.get("peek_in") or now
                 else:

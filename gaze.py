@@ -181,6 +181,12 @@ def _rows(X):
 PRIOR_MEAN = np.array([-0.33, 0.40, 1.20, -0.10,   -0.02, 4.15, 0.15, 0.02, 0.16, 0.06, -0.25,
                        #  d0    ty   pitch  yaw  | B: 1     ev    op    eh    vg    vd    od
                        0.45, -0.50, 0.40, 0.40,    0.06, 6.63, -1.90, -0.17, 0.19, 0.07, 0.09])
+# A screen the camera isn't built into (e.g. a monitor above the laptop): looking at it you move and tilt your head
+# far more than at the laptop, and up there your eyes are often too dark for the iris to tell up from down, so the
+# head has to carry more of it. Measured with `/gaze check` (18 clean dots, in dim light, monitor above a MacBook):
+# on the monitor 401 -> 270 pt with these, on 25 clicks there 175 -> 169; the laptop keeps PRIOR_MEAN (these made it
+# worse on its 170 saved clicks, 160 -> 214).
+EXTERNAL_HEAD = {1: 0.4, 2: 0.8, 12: -1.3, 13: 1.0}  # tx, yaw (x); ty, pitch (y)
 OFFSET_SD = np.array([1.5, 0.06, 1.5, 0.15])        # how unsure a new profile is of each offset (cm, rad, cm, rad)
 OFFSET_DRIFT = np.array([0.02, 0.0025, 0.02, 0.0025])  # how far each may wander per ~20 s: little. On clean dots
 # slow beats fast (56 pt at this rate, 81 at 3x, 102 at 6x): averaging over many noisy clicks matters more than
@@ -286,11 +292,20 @@ class SelfCalibration:
         self.geom = dict(geom)
         wide = 1.0 if geom.get("builtin", True) else 4.0
         self.fast, self.safe, self.anchor = Filter(wide=wide), Filter(wide=wide), Filter(wide=wide)
+        self.head_v = 2
+        if not geom.get("builtin", True):
+            self.external_head()
         self.cap = self.fast.cap.copy()
         self.live, self.errs, self.judged, self.t, self.misses = "fast", collections.deque(maxlen=WINDOW), 0, None, 0
         self.n = {k: [0, 0] for k in KINDS}  # per kind: hints seen, hints used
         self.trust = {k: 1.0 for k in KINDS}  # per kind: its distance above, scaled by how it has really done
         self.calibrated, self.notes, self.kept = None, [], 0
+
+    def external_head(self):
+        """Head terms for a screen the camera isn't built into (EXTERNAL_HEAD)."""
+        for f in (self.fast, self.safe, self.anchor):
+            for k, v in EXTERNAL_HEAD.items():
+                f.w[k] = v
 
     # -- geometry: screen points (y down from the main screen's top) <-> cm from the camera
     def _cm(self, p):
@@ -437,7 +452,7 @@ class SelfCalibration:
         return {"geom": self.geom, "fast": self.fast.to_dict(), "safe": self.safe.to_dict(),
                 "anchor": self.anchor.to_dict(), "live": self.live, "errs": [[round(v, 1) for v in e] for e in self.errs],
                 "judged": self.judged, "t": self.t, "n": self.n, "trust": self.trust, "calibrated": self.calibrated,
-                "kept": self.kept}
+                "kept": self.kept, "head_v": self.head_v}
 
     @classmethod
     def from_dict(cls, d, geom=None):
@@ -449,6 +464,13 @@ class SelfCalibration:
         c.n.update({k: list(v) for k, v in d.get("n", {}).items() if k in c.n})
         c.trust.update({k: float(v) for k, v in d.get("trust", {}).items() if k in c.trust})
         c.calibrated = d.get("calibrated")
+        c.head_v = d.get("head_v", 1)
+        if c.head_v < 2 and not c.geom.get("builtin", True) and not c.calibrated:
+            c.external_head()  # (made before EXTERNAL_HEAD: new head terms, so let the offsets find themselves again)
+            for f in (c.fast, c.safe, c.anchor):
+                f.reopen()
+            c.errs.clear()
+        c.head_v = 2
         return c
 
 
@@ -492,6 +514,58 @@ def screens():
         out.append((f, (f.origin.x, main_h - f.origin.y - f.size.height, f.size.width, f.size.height),
                     (mm.width / f.size.width) if mm.width else 0.0, int(did)))
     return out
+
+
+SWITCH = 0.2  # s: how long another screen has to keep winning before gaze moves to it
+
+
+def _off_screen(p, q):
+    """How far point p is outside screen rect q (x, y, w, h), in points (0 inside)."""
+    dx = max(q[0] - p[0], 0.0, p[0] - (q[0] + q[2]))
+    dy = max(q[1] - p[1], 0.0, p[1] - (q[1] + q[3]))
+    return math.hypot(dx, dy)
+
+
+class Brighten:
+    """In dim light, boost local contrast (CLAHE on the brightness channel) in the picture the face tracker sees.
+    Measured on /gaze check frames taken in a dim room (eyes 11-36 / 255): the gaze error went down on 12-13 of 18
+    dots, by 30 +- 10 pt on average (gamma alone: similar but noisier; both together: worse). It switches on when the
+    eyes are darker than 45 / 255 and off above 60, and costs ~2 ms a frame while on. Nothing is kept."""
+
+    ON, OFF = 45.0, 60.0
+    EYES = [33, 133, 159, 145, 263, 362, 386, 374, 468, 473]
+
+    def __init__(self):
+        import cv2
+        self.cv2, self.clahe, self.on, self.light, self.n = cv2, cv2.createCLAHE(3.0, (8, 8)), False, None, 0
+
+    def eyes(self, frame, landmarks):
+        """Mean grey level around both eyes (0-255), or None."""
+        if landmarks is None:
+            return None
+        P = np.asarray(landmarks)[self.EYES, :2]
+        (x0, y0), (x1, y1) = P.min(0), P.max(0)
+        pad = 0.25 * (x1 - x0)
+        h, w = frame.shape[:2]
+        x0, y0, x1, y1 = int(max(0, x0 - pad)), int(max(0, y0 - pad)), int(min(w, x1 + pad)), int(min(h, y1 + pad))
+        if x1 - x0 < 8 or y1 - y0 < 4:
+            return None
+        return float(frame[y0:y1:2, x0:x1:2].mean())
+
+    def __call__(self, frame_bgr, landmarks):
+        """frame (BGR) and the last frame's landmarks -> the frame the face tracker should see."""
+        self.n += 1
+        if self.n % 15 == 0 or self.light is None:  # (the light changes slowly: twice a second is plenty)
+            v = self.eyes(frame_bgr, landmarks)
+            if v is not None:
+                self.light = v if self.light is None else 0.5 * self.light + 0.5 * v
+                self.on = self.light < self.ON or (self.on and self.light < self.OFF)
+        if not self.on:
+            return frame_bgr
+        cv2 = self.cv2
+        lab = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2LAB)
+        lab[..., 0] = self.clahe.apply(lab[..., 0])
+        return cv2.cvtColor(lab, cv2.COLOR_LAB2BGR)
 
 
 def screen_under_mouse():
@@ -790,7 +864,8 @@ class Gaze:
         self.last_feats, self.raw, self.calib, self.layer, self.show_until = None, None, None, None, 0.0
         self.lens, self.lens_on, self.warp_on = None, False, False  # the glass circle that follows your gaze
         self.learning = True  # Settings > "Learn gaze as I work"
-        self.cals, self.cal = {}, None  # a model per display; the one for the screen you're on
+        self.cals, self.cal = {}, None  # a model per display; the one for the screen you're looking at
+        self.connected, self.leaning = [], None  # (models of the screens connected now; a pending switch)
         self.log = SampleLog(log) if log else None
         self.checked, self.saved, self.dirty = -99.0, time.monotonic(), False
         try:
@@ -818,27 +893,61 @@ class Gaze:
         """How far off it typically is (screen points): the snapping radius."""
         return self.cal.radius if self.cal is not None else 220.0
 
-    def _screen(self, t):
-        """The model for the screen you're on (the one with the mouse), made the first time it's needed."""
-        if t - self.checked < 2.0:
-            return self.cal
+    def _screens(self, t):
+        """A model for every connected screen (made the first time it's seen); checked every 2 s. -> [models]."""
+        if t - self.checked < 2.0 and self.connected:
+            return self.connected
         self.checked = t
         try:
             every = screens()
-            scr = screen_under_mouse()
-            key, geom = str(scr[3]), geometry(scr, every)
         except Exception:
-            return self.cal
-        cal = self.cals.get(key)
-        if cal is None:
-            cal = (carry_over(geom, date=self.old.get("date")) if self.old and self.old.get("display") == scr[3]
-                   else None) or SelfCalibration(geom)
-            self.cals[key], self.old, self.dirty = cal, None, True
-        elif cal.geom != geom:  # (resolution or arrangement changed: the weights are in cm, so they still hold)
-            cal.geom = geom
-        if cal is not self.cal:
-            self.cal, self.filter = cal, OneEuro()
-        return cal
+            return self.connected
+        out = []
+        for scr in every:
+            key, geom = str(scr[3]), geometry(scr, every)
+            cal = self.cals.get(key)
+            if cal is None:
+                cal = (carry_over(geom, date=self.old.get("date")) if self.old and self.old.get("display") == scr[3]
+                       else None) or SelfCalibration(geom)
+                self.cals[key], self.old, self.dirty = cal, None, True
+            elif cal.geom != geom:  # (resolution or arrangement changed: the weights are in cm, so they still hold)
+                cal.geom = geom
+            out.append(cal)
+        self.connected = out
+        if self.cal not in out:
+            try:
+                did = screen_under_mouse()[3]
+            except Exception:
+                did = None
+            self.cal = next((c for c in out if c.geom.get("display") == did), out[0] if out else None)
+            self.filter = OneEuro()
+        return out
+
+    def _pick(self, t, f):
+        """Which screen you're looking at: each screen's model says where you look; the one whose answer lands on
+        (or nearest) its own screen wins, and it has to keep winning for SWITCH seconds before gaze moves there
+        (on /gaze check frames: the right screen on 92 % of single frames, all of the misses near the edge
+        between the screens). -> (model, its prediction)."""
+        cands = self._screens(t)
+        if not cands:
+            return None, None
+        preds = {id(c): c.predict(f)[0] for c in cands}
+        if len(cands) == 1:
+            return cands[0], preds[id(cands[0])]
+        best = min(cands, key=lambda c: _off_screen(preds[id(c)], c.geom["screen"]))
+        cur = self.cal if self.cal in cands else best
+        if best is cur:
+            self.leaning = None
+        elif _off_screen(preds[id(best)], best.geom["screen"]) + 40 < _off_screen(preds[id(cur)], cur.geom["screen"]):
+            if self.leaning is None or self.leaning[0] is not best:
+                self.leaning = (best, t)
+            elif t - self.leaning[1] >= SWITCH:
+                cur, self.leaning = best, None
+        else:
+            self.leaning = None
+        if cur is not self.cal:
+            self.cal, self.filter = cur, OneEuro()  # (a clean jump to the other screen, not a glide across)
+        return cur, preds[id(cur)]
 
     def update(self, t, landmarks, matrix, blend, airpods=None):
         """airpods: (t, pitch, yaw, roll) degrees, or None."""
@@ -852,10 +961,12 @@ class Gaze:
         head = self.head.update(t, cam, ap)
         f = features(landmarks, matrix, head)
         self.last_feats = f
-        cal = self._screen(t)
-        if self.calib is not None or cal is None or f is None:
+        if self.calib is not None or f is None:
             return self._lens(t, None)
-        px, py = cal.predict(f)[0]
+        cal, p = self._pick(t, f)
+        if cal is None:
+            return self._lens(t, None)
+        px, py = p
         self.raw = (float(px), float(py))  # (as predicted: may be off the screen, when you look away)
         q = cal.geom["screen"]
         m = 0.05 * min(q[2], q[3])  # (kept on the screen, give or take a little)

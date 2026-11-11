@@ -227,7 +227,23 @@ eyes are on it), and fades out. The next time it starts fresh; Claude still reme
   Send, Delete, Pay or Buy get an orange ring and need a second tap (or a steady look at them first). If
   nothing clickable is near, it says so instead of guessing; private windows are never clicked. Off in
   Settings, or `/gaze click off`.
-* **Look up at the notch to see it again.** If a reply tucked away before you finished it, stare right at the notch
+* **A faint glass sheen shows what Right ⌘ would press.** While gaze is on, the control you're looking at gets a
+  whisper of liquid glass (a soft rim and a highlight along its top; no blur, so its text stays sharp). Right ⌘
+  presses exactly that one. It sticks to a control until your gaze has clearly left it, so it doesn't flicker
+  between neighbours, glides to the next one, and shows nothing when gaze isn't sure enough (snap radius over
+  170 pt), over private windows or over silent chat. `/gaze glass off` (or Settings) turns it off. It looks
+  something up a few times a second, only while your gaze moves.
+* **Several screens.** Each screen has its own gaze model; the one whose answer lands on its own screen wins, so
+  gaze follows your eyes to the other screen instead of the mouse (it has to keep winning for 0.2 s, so it doesn't
+  flicker). A monitor the camera isn't built into uses more of your head movement: looking up at one, people
+  tilt their head back 15-30° and their eyes are often too dark to tell up from down.
+* **Dim light.** When your eyes are dark in the picture (under 45 / 255), the frame gets a local contrast boost
+  before face tracking (`/gaze brighten off` turns it off). In a dim room this cut the error by ~30 pt.
+* **`/gaze check` measures it.** Nine dots on each screen, ~35 s, learns nothing: it reports the typical error
+  per screen and keeps the frames on this Mac (`data/silent_chat/gaze_check/`) so changes can be measured offline.
+  Measured in a dim room (eyes 11-36 / 255), monitor above a MacBook: laptop 102 pt; monitor 492 pt before, ~270
+  pt with the head terms above (a webcam below the monitor can't see much of your eyes up there; that's the limit).
+* **Look up at the notch to see it again** (`/peek on|off`, or Settings; off for now). If a reply tucked away before you finished it, stare right at the notch
   for about a second (camera and gaze on): the island drops down with your recent conversation, and
   goes away a second or two after you look elsewhere. Esc closes it; look away once and it works again.
 * **\\ turns the camera on or off.** With the camera off, replies and notifications still show in the island.
@@ -246,7 +262,10 @@ eyes are on it), and fades out. The next time it starts fresh; Claude still reme
 
 **Hands-free, without false alarms.** When it starts by itself (HANDS-FREE on), what it read shows in the island,
 and then:
-1. **A clear instant command or saved shortcut** ("pause", "next song", "open my DMs with Alex") runs at once.
+1. **A clear instant command or saved shortcut** ("pause", "next song", "open my DMs with Alex") goes through the
+   nod check below: harmless ones run at once, anything else asks you to nod. A reading only counts as a command
+   when the lip-reader's first guess clearly leads its next one (the short "NEXT" used to win by a hair over
+   chatter, while a video was talking).
 2. **Otherwise a free word check** drops chatter ("okay", "so I'm going to", "now"): the words are struck through
    and the island retracts.
 3. **Anything that might be a request goes to a small model on your Mac** (Qwen3 1.7B, 4-bit, MLX: about 0.2–0.5 s,
@@ -258,8 +277,29 @@ and then:
      still answer IGNORE, and then it's struck through.
    Closing or pressing anything always goes to Claude, so a misread can't close your work.
 **Right after Claude asks you something**, the next thing you mouth is taken as your answer and goes straight back
-to Claude (it has the context), skipping the filters. Claude also no longer asks you to confirm harmless things
-like playing music or opening an app; it does the most likely reading, and you can say stop.
+to Claude (it has the context), skipping the filters. Claude doesn't ask you to confirm harmless things; it does
+the most likely reading, and you can say stop. (Audio is no longer one of those: see the nod check below. This
+partly reverses "act on harmless requests without confirming", commit a4f2470, because hands-free kept skipping
+songs on its own: 71 times in three days, almost all misreadings.)
+
+**Nod to confirm (consequential actions).** Every local action passes one check (consequence.py) before it runs:
+* **Runs at once:** pausing, turning the volume down, scrolling, showing or hiding silent chat, its own switches.
+* **Asks for a nod:** playing, skipping, going back or turning up music; opening apps, tabs and web searches;
+  closing a tab; pressing a control; running a saved shortcut; and sending (Claude's own "go ahead?" works the
+  same way).
+* **How it started matters.** Typed: runs. Said out loud: runs, unless it sends something. A deliberate mouthed
+  start (Option, long blink): runs when the lip-reader was clearly sure, asks when its top guesses were close.
+  Hands-free: always asks.
+
+The island shows the question plainly ("Skip to the next song? Nod to confirm."). **A nod runs it; a shake,
+looking away, Esc or about 4 s of nothing cancels**, which is the default. It uses AirPods motion when they're in,
+otherwise the camera. Bobbing your head to music doesn't count: only a nod that starts after the question appears
+does, and if your head was already moving before, the nod has to be clearly bigger than that movement. Every
+decision and answer is logged to `data/silent_chat/gate.log`. On the logged hands-free actions (118): of the 75
+that were instant commands, 53 would now ask, 21 wouldn't count as a command at all, and 1 (a pause) would still
+run. Lip-reading clips from actions nobody asked for are no longer used as training data (88 old ones are marked
+"doubtful", 68 of them "NEXT"; a nod makes a clip a confirmed label, a cancel marks it "rejected"). Turn the check
+off in Settings or with `/gate off`.
 Each false start makes hands-free about 5% harder to set off, up to +60%, and each real use eases it back. It
 also learns where "facing the screen" is for you: after 8 deliberate starts (Option or a long blink) it only starts
 by itself when your head is within about 10° of how you usually hold it then. (A fixed cutoff looked perfect on the

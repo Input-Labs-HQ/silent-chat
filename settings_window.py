@@ -53,6 +53,8 @@ def _window(title, h):
 
 # (state key, label, what it does, command to turn it on, command to turn it off; None = toggle command)
 SWITCHES = [
+    ("gate", "Nod to confirm", "Music, opening apps and sending wait for your nod first.",
+     "/gate on", "/gate off"),
     ("handsfree", "Hands-free", "Just mouth at the screen; a local model filters out chatter.",
      "/handsfree on", "/handsfree off"),
     ("wake", "“Hey Claude”", "Always listen for “Hey Claude” (speech is checked on this Mac).", None, None),
@@ -64,6 +66,10 @@ SWITCHES = [
     ("gaze", "Gaze awareness", "Tell Claude roughly what you were looking at as you spoke.", "/gaze on", "/gaze off"),
     ("gclick", "Right ⌘ clicks where I look", "Tap Right Command alone to click what you're looking at.",
      "/gaze click on", "/gaze click off"),
+    ("gglass", "Show what Right ⌘ would press", "A faint glass sheen on the control you're looking at.",
+     "/gaze glass on", "/gaze glass off"),
+    ("peek", "Look at the notch to open it", "Staring at the notch brings the conversation back.", "/peek on",
+     "/peek off"),
     ("lens", "Glass lens", "A subtle lens that follows your gaze.", "/lens on", "/lens off"),
     ("warp", "Lens bends the screen", "Needs Screen Recording; nothing is kept or sent.", "/lens warp on",
      "/lens warp off"),
