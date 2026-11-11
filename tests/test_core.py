@@ -8,6 +8,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+import gaze_click  # noqa: E402
 import local_commands  # noqa: E402
 import presence  # noqa: E402
 import privacy  # noqa: E402
@@ -59,6 +60,44 @@ class DictateOrRequest(unittest.TestCase):
                   "what time works for you?", "Let me know if you can message me later",
                   "I told Sam about it on Discord"]:
             self.assertFalse(local_commands.is_request(t), t)
+
+
+class GazeClick(unittest.TestCase):
+    """Tap Right Command to click what you're looking at."""
+
+    def test_tap(self):
+        d = gaze_click.TapDetector()
+        d.flags(54, True, 1.0)
+        d.flags(54, False, 1.2)
+        self.assertEqual(d.take(), [1.2])
+
+    def test_not_a_tap(self):
+        d = gaze_click.TapDetector()
+        d.flags(54, True, 1.0)
+        d.other()  # Right Cmd + C
+        d.flags(54, False, 1.1)
+        d.flags(54, True, 2.0)
+        d.flags(54, False, 2.6)  # held too long
+        d.flags(54, True, 3.0)
+        d.flags(56, True, 3.05)  # Shift joined in
+        d.flags(54, False, 3.1)
+        d.flags(55, True, 4.0)  # left Command: not ours
+        d.flags(55, False, 4.1)
+        self.assertEqual(d.take(), [])
+
+    def test_snaps_to_nearest_clickable(self):
+        cands = [{"role": "AXButton", "label": "Far", "rect": (300, 100, 60, 24)},
+                 {"role": "AXLink", "label": "Near", "rect": (130, 100, 60, 20)},
+                 {"role": "AXStaticText", "label": "text under the gaze", "rect": (90, 95, 30, 30)},
+                 {"role": "AXGroup", "label": "", "rect": (100, 100, 10, 10)}]
+        self.assertEqual(gaze_click.choose(100, 110, 80, cands)["label"], "Near")
+        self.assertIsNone(gaze_click.choose(100, 110, 80, cands[:1]))  # (out of reach)
+
+    def test_risky(self):
+        self.assertTrue(gaze_click.risky({"label": "Send"}))
+        self.assertTrue(gaze_click.risky({"label": "Delete conversation"}))
+        self.assertFalse(gaze_click.risky({"label": "Sender details"}))
+        self.assertFalse(gaze_click.risky({"label": "Open"}))
 
 
 class HandsFreeFilter(unittest.TestCase):

@@ -86,12 +86,17 @@ class ToggleKey:
         self.char, self.keycode, self.window = char, TOGGLE_KEYS[char], double_tap
         self.presses, self.pending, self.ok, self.tap = [], None, False, None
         self.last_key = 0.0  # when any other key was last pressed (tells Option dictation from Option shortcuts)
+        import gaze_click
+        self.rcmd = gaze_click.TapDetector()  # Right Command taps: click what you're looking at
         self._ready = threading.Event()
         threading.Thread(target=self._run, daemon=True).start()
         self._ready.wait(3)
 
     def _run(self):
-        mask = Quartz.CGEventMaskBit(Quartz.kCGEventKeyDown) | Quartz.CGEventMaskBit(Quartz.kCGEventKeyUp)
+        mask = (Quartz.CGEventMaskBit(Quartz.kCGEventKeyDown) | Quartz.CGEventMaskBit(Quartz.kCGEventKeyUp)
+                | Quartz.CGEventMaskBit(Quartz.kCGEventFlagsChanged)
+                | Quartz.CGEventMaskBit(Quartz.kCGEventLeftMouseDown)
+                | Quartz.CGEventMaskBit(Quartz.kCGEventRightMouseDown))
         self.tap = Quartz.CGEventTapCreate(Quartz.kCGSessionEventTap, Quartz.kCGHeadInsertEventTap,
                                            Quartz.kCGEventTapOptionDefault, mask, self._callback, None)
         if self.tap is None:
@@ -108,6 +113,15 @@ class ToggleKey:
         if etype in (Quartz.kCGEventTapDisabledByTimeout, Quartz.kCGEventTapDisabledByUserInput):
             Quartz.CGEventTapEnable(self.tap, True)
             return event
+        if etype == Quartz.kCGEventFlagsChanged:
+            self.rcmd.flags(Quartz.CGEventGetIntegerValueField(event, Quartz.kCGKeyboardEventKeycode),
+                            bool(Quartz.CGEventGetFlags(event) & Quartz.kCGEventFlagMaskCommand), time.monotonic())
+            return event
+        if etype in (Quartz.kCGEventLeftMouseDown, Quartz.kCGEventRightMouseDown):
+            self.rcmd.other()
+            return event
+        if etype == Quartz.kCGEventKeyDown:
+            self.rcmd.other()
         if Quartz.CGEventGetIntegerValueField(event, Quartz.kCGKeyboardEventKeycode) != self.keycode:
             if etype == Quartz.kCGEventKeyDown:
                 self.last_key = time.monotonic()

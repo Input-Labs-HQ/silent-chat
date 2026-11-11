@@ -220,6 +220,13 @@ eyes are on it), and fades out. The next time it starts fresh; Claude still reme
 * **Hover over the island (or the bare notch) to type.** The chat drops down with your recent conversation and a
   text box. Click the box, type, and press Return. It closes when the mouse leaves, unless the box has text in it.
   It never takes the keyboard by itself.
+* **Tap Right ⌘ to click what you're looking at.** Press and release Right Command on its own. The spot you're
+  looking at snaps to the nearest button, link, tab or field within gaze's usual error, a blue ring flashes on
+  it, and it's clicked; the pointer goes back where it was. Shortcuts with either Command key work as before (a
+  tap only counts with no other key or click in between, and under about a third of a second). Buttons like
+  Send, Delete, Pay or Buy get an orange ring and need a second tap (or a steady look at them first). If
+  nothing clickable is near, it says so instead of guessing; private windows are never clicked. Off in
+  Settings, or `/gaze click off`.
 * **Look up at the notch to see it again.** If a reply tucked away before you finished it, stare right at the notch
   for about a second (camera and gaze on): the island drops down with your recent conversation, and
   goes away a second or two after you look elsewhere. Esc closes it; look away once and it works again.

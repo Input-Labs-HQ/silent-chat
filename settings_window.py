@@ -62,6 +62,8 @@ SWITCHES = [
     ("screen", "Screen awareness", "Send a short, privacy-checked summary of the window in front.", "/screen on",
      "/screen off"),
     ("gaze", "Gaze awareness", "Tell Claude roughly what you were looking at as you spoke.", "/gaze on", "/gaze off"),
+    ("gclick", "Right ⌘ clicks where I look", "Tap Right Command alone to click what you're looking at.",
+     "/gaze click on", "/gaze click off"),
     ("lens", "Glass lens", "A subtle lens that follows your gaze.", "/lens on", "/lens off"),
     ("warp", "Lens bends the screen", "Needs Screen Recording; nothing is kept or sent.", "/lens warp on",
      "/lens warp off"),

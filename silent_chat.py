@@ -43,6 +43,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 
+import gaze_click
 import local_commands
 import improve
 import island
@@ -749,6 +750,47 @@ def run_live(args):
         amb["unfocus"] = True
     isl = island.Island(on_text=sent_from_box, on_control=spotify_control, on_tap=island_tap)
 
+    gclick_ring = gaze_click.Ring()
+
+    def gaze_tap(t, now):
+        """Right Command was tapped at t: find what you're looking at and click it (risky ones need a second tap
+        or a steady look). -> a short hint for the island, or None."""
+        pending = amb.get("gclick")
+        if pending and not pending.get("at") and now - pending["t"] < 2.0:  # second tap: confirmed
+            pending["at"] = now
+            return None
+        if not (gazer.ready and ui["gaze"]):
+            return "Gaze is off: turn the camera on to click by looking."
+        gp = gazer.point(t - 0.4, t + 0.05)
+        if gp is None:
+            return "Can't see your eyes right now."
+        radius = max(30.0, min(float(gazer.radius), 160.0))
+        cands, app, pid = gaze_click.probe(gp[0], gp[1], radius)
+        if app and pid and privacy.blocked(app, gaze_click.window_title(pid)):
+            return "That window is private: not clicking there."
+        c = gaze_click.choose(gp[0], gp[1], radius, cands)
+        if c is None:
+            if radius <= 60:
+                c = {"role": "point", "label": "", "rect": (gp[0] - 8, gp[1] - 8, 16, 16)}
+            else:
+                return "Nothing clickable where you're looking."
+        c = {**c, "app": app or "?", "t": now}
+        if gaze_click.risky(c):
+            x, y, w, h = c["rect"]
+            m = 0.5 * radius
+            pts = [(px, py) for tt, px, py in gazer.hist if t - 0.5 <= tt <= t]
+            steady = len(pts) >= 5 and all(x - m <= px <= x + w + m and y - m <= py <= y + h + m for px, py in pts)
+            gclick_ring.show(c["rect"], risky_=True)
+            if not steady:
+                amb["gclick"] = c
+                return f"Tap Right Command again to click “{c['label']}”."
+            c["at"] = now + 0.25
+        else:
+            gclick_ring.show(c["rect"])
+            c["at"] = now + 0.15
+        amb["gclick"] = c
+        return None
+
     def on_escape(event):
         if event.keyCode() == 53:  # Esc: put the island away
             esc_q.put(1)
@@ -1084,7 +1126,7 @@ def run_live(args):
                 "ambient": ui["ambient"], "gaze": ui["gaze"], "warp": ui["warp"],
                 "improve": improve.load().get("enabled", True), "clips": SAVE_CLIPS[0],
                 "remember": settings.get("remember", True), "clicks": gazer.learning,
-                "nudges": settings.get("nudges", False)}
+                "nudges": settings.get("nudges", False), "gclick": settings.get("gaze_click", True)}
     menu = StatusMenu(typed.put, settings_state, args.toggle_key)
     import settings_window
 
@@ -1625,6 +1667,20 @@ def run_live(args):
                 set_open(ui["toggle"])
                 ui["toggle"] = None
             now = time.monotonic()
+            # ---- tap Right Command: click what you're looking at (snapped to the nearest clickable thing)
+            for t_tap in (toggle.rcmd.take() if toggle else []):
+                if settings.get("gaze_click", True):
+                    notice = gaze_tap(t_tap, now) or notice
+            gc = amb.get("gclick")
+            if gc and gc.get("at") and now >= gc["at"]:
+                amb["gclick"] = None
+                gclick_ring.hide()
+                cx, cy = gaze_click.centre(gc["rect"])
+                control.mouse_click(cx, cy)
+                print(f"[gaze click] clicked {gc['label']!r} ({gc['role']}) in {gc['app']}", flush=True)
+            elif gc and not gc.get("at") and now - gc["t"] > 2.0:  # (a risky one nobody confirmed)
+                amb["gclick"] = None
+                gclick_ring.hide()
             if args.toggle_key != "none" and not (toggle and toggle.ok) and now - retry["key"] > 3:
                 retry["key"] = now  # permissions granted after start-up: the key starts working without a restart
                 toggle = typer.ToggleKey(args.toggle_key)
@@ -1985,6 +2041,9 @@ def run_live(args):
                             print("[power] " + amb["np_note"], flush=True)
                     threading.Thread(target=measure, daemon=True).start()
                     notice = "Measuring power use for 20 s ..."
+                elif cmd == "/gaze" and rest.strip() in ("click on", "click off"):
+                    save_setting("gaze_click", rest.strip().endswith("on"))
+                    notice = f"Right Command click-where-you-look {rest.split()[-1]}."
                 elif cmd == "/nudges" and rest.strip() in ("on", "off"):
                     save_setting("nudges", rest.strip() == "on")
                     notice = f"Reply suggestions {rest.strip()}."

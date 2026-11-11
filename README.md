@@ -100,6 +100,7 @@ to turn the camera on.
 | Say “Hey Claude, …” | Talk out loud |
 | Hover over the notch | See the conversation and type |
 | Look up at the notch | See the conversation again |
+| Tap Right ⌘ | Click what you're looking at |
 | Click the island · press Esc | More history · put it away |
 | Long blink · smile · raise eyebrows | Listen · delete a word · Enter |
 | Nod · shake your head | Yes · no, when Claude asks |
