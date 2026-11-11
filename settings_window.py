@@ -76,12 +76,12 @@ SWITCHES = [
      "/privacy clips on", "/privacy clips off"),
     ("remember", "Remember across restarts", "Keep your last few exchanges on this Mac so a restart keeps context.",
      "/privacy remember on", "/privacy remember off"),
-    ("clicks", "Learn gaze from clicks", "Use where you click to keep eye tracking accurate.",
+    ("clicks", "Learn gaze as I work", "Eye tracking calibrates itself from what you click, type and look at.",
      "/privacy clicks on", "/privacy clicks off"),
 ]
 MODELS = [("auto", "Auto: Haiku, Opus when needed"), ("haiku", "Haiku (cheapest)"), ("opus", "Opus (smartest)")]
-BUTTONS = [("Practice (2 min)", "/practice"), ("Calibrate Gaze…", "/gaze calibrate"), ("Show Where I'm Looking", "/gaze show 20"),
-           ("Improve Now", "/improve"), ("Show Stats", "/stats window"), ("Setup…", "/setup")]
+BUTTONS = [("Practice (2 min)", "/practice"), ("Recalibrate Gaze…", "/gaze calibrate"), ("Improve Now", "/improve"),
+           ("Show Where I'm Looking", "/gaze show 20"), ("Show Stats", "/stats window"), ("Setup…", "/setup")]
 
 
 class SettingsWindow:
@@ -198,7 +198,7 @@ class SetupWindow:
             v.addSubview_(b)
             self.marks.append((mark, check))
         y -= 60
-        for title, cmd, x in (("Calibrate Gaze…", "/gaze calibrate", 24), ("Done", "done", None)):
+        for title, cmd, x in (("Calibrate Gaze (optional)…", "/gaze calibrate", 24), ("Done", "done", None)):
             b = NSButton.buttonWithTitle_target_action_(title, self.target, "pressed:")
             b.sizeToFit()
             b.setFrameOrigin_((x if x is not None else W - b.frame().size.width - 24, y))

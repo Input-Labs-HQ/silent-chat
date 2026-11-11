@@ -276,28 +276,78 @@ anything because of where you looked; it acts only when you ask, and asks if it 
   nothing; it needs Screen Recording permission (without it the circle is drawn but nothing bends). Measured: ~10 ms
   per frame on a background thread, about 5% of one CPU core. `/lens warp off` keeps the circle without the bend. (macOS's own Liquid Glass material can't see other apps' windows, so it
   frosts the text behind it into a grey disc; silent chat bends the screen patch itself instead.)
-* **Calibrate once** (menu bar > Calibrate Gaze…, or `/gaze calibrate`, with the overlay showing): put your mouse
-  on the screen you want, then look at each dot as it appears (about a minute). 20 dots teach it your eyes; then 9
-  *new* dots measure the real error, which it reports and saves. `/gaze` shows the measured error again.
+* **No calibration.** It starts from geometry (the camera is at the top of the screen, eyes turn about so far
+  per millimetre the iris moves, your head is where the camera sees it) and then learns where *your* "straight
+  ahead" is from the moments it can guess what you're looking at:
+  * **you click something:** your eyes rested on it as the cursor closed in (of the steady looks in the second
+    before the click, the one nearest it)
+  * **the cursor comes to rest** somewhere without a click, with your eyes near it
+  * **you type:** eyes near the text caret (Accessibility says where the caret is; nothing you type is read)
+  * **something pops up** (a notification, the island, a small dialog) and your eyes jump to it
+  * **your eyes follow the cursor** while you drag or steer it
+
+  Each is a noisy hint. In about half of clicks your eyes are somewhere else, so every kind is weighted by how
+  reliable it has proved, far-off hints are ignored, and only clicks are taken at face value (the others count only
+  when gaze already roughly agrees). A new profile is usable after about ten clicks and settles within thirty.
+* **It checks itself.** Every click is first predicted, then learned, so its error is always measured on clicks it
+  hasn't seen. Two learners run side by side (one uses every kind of hint, one only clicks) next to a frozen copy
+  of the last model that earned its place. Every 10 clicks the better learner goes live; it replaces the frozen copy
+  only if it beat it on the last 30 clicks, and if the frozen copy beats both, they're rolled back to it. Wrong
+  about five clicks in a row (a new chair, a new desk) and it starts "straight ahead" over. Decisions are logged in
+  `data/silent_chat/gaze_eval.log`; `/gaze` shows the current error and what it has learned from.
+* **Recalibrate (optional)** (menu bar > Recalibrate Gaze…, or `/gaze calibrate`, with the camera on): put your
+  mouse on the screen you want, then look at each dot as it appears (about a minute). 20 dots, then 9 *new* dots
+  that measure the real error. It's worth doing once: the dots measure how far your eyes move (the gains), which
+  clicks can't teach. Clicks made while looking elsewhere pull every gain towards zero: when clicks were allowed to
+  retune the gains, the learned gaze range shrank by about 30 % vertically and the error on clean dots doubled. So
+  hints only ever move the four offsets; the gains come from the starting weights (measured on one person) or from
+  your own calibration.
 * How: the camera's view of each iris inside its eye, your eyelids (they follow vertical gaze), and your head's
-  direction and position. With AirPods in, their motion sensors steady the head direction: the camera gives the
-  absolute direction, the AirPods the precise fast movement (they learn each other's axes on the fly). In
-  simulation that cut head-direction error by 40–57%.
-* Be realistic: webcam eye tracking is typically off by 2–4 cm. GazeLink, the eye tracker plugin already on this
-  Mac, measured 198 pt (about 4 cm on the MacBook screen) in its own calibration. Silent chat, calibrated on
-  the MacBook screen with AirPods in, measured a typical error of 80 pt (1.6 cm) on 9 fresh dots, worst 155 pt
-  (3.1 cm), 6 of 9 within 100 pt: well under half GazeLink's error, but still a fingertip or two. (It ignores small
-  head shifts: an early version that didn't flung the point off screen when you leaned.) So it never clicks
-  exactly where it thinks you look. It snaps to the nearest control, which works when targets are a finger-width
-  or more apart. Close-packed small links need a name ("press Settings").
+  direction, tilt, position and distance. Eye and head angles are multiplied by your distance, so leaning back or
+  in is accounted for, and a tilted head is turned back upright first. With AirPods in, their motion sensors steady
+  the head direction: the camera gives the absolute direction, the AirPods the precise fast movement (they learn
+  each other's axes on the fly). In simulation that cut head-direction error by 40–57%.
+* Be realistic: webcam eye tracking is typically off by 1–4 cm. Measured on this Mac with `eval_gaze.py`, on 170
+  saved clicks and one calibration's dots over two days (1 cm is 50 pt on this screen; median / 90th percentile):
+
+  | | before: calibrate, then refit from clicks | now |
+  |---|---|---|
+  | 9 fresh dots, right after calibrating | 59 / 145 pt | 35 / 168 pt |
+  | the 90 clicks after that calibration | 183 / 268 pt (221 / 354 without its refits) | 142 / 278 pt |
+  | the same 9 dots, "straight ahead" learned from clicks alone, at 17 moments over both days | not possible | 50 / 84 pt |
+
+  A click is a noisy label, so the click rows overstate the real error for both; the dots are the clean test. The
+  last row is the point: the old model was accurate for the sitting it was calibrated in (59 pt) and 3–4 times
+  worse on what you clicked afterwards; now clicks alone keep it at about 1 cm (87, 66, 54 pt after the first 10,
+  20, 30 clicks from nothing). Someone who never calibrates, with eyes that move 25 % more or less than the starting
+  weights assume, lands at 110–145 pt on those dots until they calibrate once. It still never clicks exactly where
+  it thinks you look: it snaps to the nearest control, which works when targets are a finger-width or more apart.
+  Close-packed small links need a name ("press Settings").
 * **Show Where I'm Looking** (menu bar, or `/gaze show`) draws a ring that follows your gaze for 20 s.
-* **It keeps calibrating itself from your clicks.** You look at what you click, so each click (where gaze already
-  roughly agreed) becomes a calibration example. Every 10 new clicks it refits, and keeps the new model only if it's
-  more accurate on your latest clicks it didn't train on. Each refit is logged in `gaze_eval.log`.
 * `/gaze where [n] [seconds]` is a dry run: every few seconds a tick logs what you're looking at and the nearest
   controls, pressing nothing. Handy for checking it on a new app.
-* It works on the screen it was calibrated on; recalibrate if you move the laptop or your seat a lot. `/gaze off`
-  turns it off. Every calibration's results are kept in `data/silent_chat/gaze_eval.log`.
+* **Each screen learns separately**, and the one with your mouse on it is the one in use. On a screen the camera
+  isn't built into it starts with no idea where "straight ahead" lands and finds out from your clicks there.
+* `/gaze reset` forgets what it learned on this screen (someone else is using the Mac). `/gaze off` turns gaze
+  awareness off. **Learn gaze as I work** in Settings stops the learning and the logging.
+* What's kept, on this Mac only: per hint, twelve numbers about your eyes and head, a screen point, the kind of
+  hint and the time (`data/silent_chat/gaze_passive.npz`; for clicks also those twelve numbers over the second
+  before, `gaze_traces.npz`). No pictures, no keys, nothing that's on screen. They're what `eval_gaze.py` measures
+  with:
+
+  ```bash
+  .venv/bin/python eval_gaze.py
+  ```
+
+  ```bash
+  .venv/bin/python eval_gaze.py --passive
+  ```
+
+  The first prints the table above from the saved clicks and calibration; the second summarises what the running
+  app has logged since, per kind of hint, and replays it with and without the kinds beyond clicks.
+* CPU: one prediction per camera frame (a 22-number dot product) and a few small matrix updates per hint; the
+  Accessibility lookups (the caret, the window in front) happen at most every couple of seconds on their own
+  threads. `/power` reads the same as before.
 
 **More on the island.** Click it to open up more of the conversation (click again to close), and press **Esc**
 anywhere to put it away. Under each reply are a small 👍 and 👎: your ratings go into `feedback.jsonl`, into the
@@ -320,13 +370,13 @@ one core.
 
 **Settings and first-run setup.** Menu bar > **Settings…** (or `/settings`) has every switch in one window:
 hands-free, "Hey Claude", spoken replies, the notch, screen and gaze awareness, the lens, notifications,
-self-improvement, face gestures and the Claude model, plus Calibrate Gaze and Improve Now. On first start, **Set
+self-improvement, face gestures and the Claude model, plus Recalibrate Gaze and Improve Now. On first start, **Set
 Up Silent Chat** lists the permissions it needs (Camera, Microphone, Accessibility, Input Monitoring, Screen
 Recording, and Claude Code signed in), each with a live check mark and a button to the right System Settings page.
 `/setup` opens it again.
 * **Privacy switches** (Settings): screen awareness, gaze awareness, the glass lens and its screen bending,
   notifications, **Save mouth clips for training** (off: clips are read and thrown away, nothing new is kept),
-  **Remember across restarts**, and **Learn gaze from clicks**. Each one is off the moment you flip it.
+  **Remember across restarts**, and **Learn gaze as I work**. Each one is off the moment you flip it.
 
 **Memory.** It used to hold 4–5 GB, mostly models idling on the GPU. Now:
 * the big Whisper loads only to transcribe what you say (~0.5 s the first time) and unloads after 2 idle minutes;
@@ -499,6 +549,23 @@ It learns from your sessions in two ways:
 Retraining needs volume: expect real gains after a few hundred varied clips, not a few dozen. Corrections matter
 most, because they are exactly the cases the model gets wrong.
 
+**How far that has got, and what else was tried** (`eval_lipread.py`, 227 usable clips after four days; 207 of them
+are "Claude's reading, and you carried on", only 12 were corrected or picked by you):
+* Fine-tuning works. On clips neither model trained on, the original model gets 80.7 % of words wrong on your
+  session clips (32 clips held out, 254 words) and your personal model 47.2 %; on the 25 set sentences, 58.6 % and
+  46.3 %.
+* Re-ranking the lip-reader's 10 guesses by your own phrasing (a word-pair model of everything you'd said before
+  each clip, tuned on the earlier half of your clips) doesn't: 44.6 % -> 45.7–46.5 % on the later half. The right
+  sentence is among the 10 guesses 49 % of the time and first 33 % of the time, so there is room, but a few hundred
+  sentences is too little text to out-guess the decoder. It isn't in the app. Claude, which sees your vocabulary
+  and past corrections, already does this job with far more language behind it.
+* Decoding settings are where they should be: CTC weight 0 / 0.1 / 0.3 gives 45.7 / 46.3 / 48.1 % on the set
+  sentences and 47.2 / 47.2 / 47.6 % held out; beam 40 reads exactly like beam 10 at 2.5 times the cost.
+
+```bash
+.venv/bin/python eval_lipread.py --models
+```
+
 **`--confirm` mode** is the earlier flow: hold SPACE in the camera window, then pick 1/2/3 (or T to type). Its
 labels are all confirmed, so it collects the cleanest training data.
 
@@ -511,7 +578,13 @@ Limits of this prototype:
 `.venv/bin/python -m unittest discover tests` checks, in a fraction of a second and without camera, mic or models:
 instant commands ("please pause", web search vs searching *in* an app), the hands-free word filter, the checks on
 the local model's answers, the wake word and Whisper's silence phrases, the privacy rules and redaction, the safety
-rules for self-built shortcuts, and shortcut matching. `SLOW=1` also runs the local model (routing and privacy).
+rules for self-built shortcuts, and shortcut matching. For gaze, with a simulated person whose "straight ahead" and
+eye gains differ from the starting weights: a new profile finds its offsets from clicks of which 4 in 10 are made
+looking elsewhere, clicks never change the gains, Recalibrate measures them, a misleading kind of hint is caught and
+loses its weight, far-off hints are ignored until it's clearly lost, a tilted head is handled, and the model
+survives being saved and loaded; and which moments count as hints (the look that was on the click, a cursor at
+rest, a pop-up the eyes jump to, eyes following a drag, the caret while typing). `SLOW=1` also runs the local model
+(routing and privacy).
 
 ## The lip-reading feasibility test (phase 1)
 

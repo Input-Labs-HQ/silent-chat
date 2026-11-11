@@ -1,16 +1,28 @@
-"""Where you're looking on screen: the camera's iris and head pose, steadied by AirPods head motion, calibrated to you.
+"""Where you're looking on screen: the camera's iris and head pose, steadied by AirPods head motion. It calibrates
+itself while you work.
 
-Webcam eye tracking is coarse (a few centimetres), so silent chat doesn't click where it thinks you look: it uses
-the gaze point to pick the nearest button / link / field (snapping), and tells Claude what you were looking at
-when you said "this". `/gaze calibrate` measures the real error on fresh points and saves it with the model.
+Webcam eye tracking is coarse (a couple of centimetres), so silent chat doesn't click where it thinks you look: it
+uses the gaze point to pick the nearest button / link / field (snapping), and tells Claude what you were looking at
+when you said "this".
+
+There is no calibration step. A geometric model (below) turns the eyes and head into a point on the screen; what
+it has to find out about you is where your "straight ahead" lands, and that it learns from the moments it can guess
+where you're looking: you click something, the cursor comes to rest, you type at the caret, something pops up and
+your eyes jump to it, your eyes follow what you drag (gaze_passive.py finds those moments). Every one is a noisy
+hint (in about half of clicks your eyes are somewhere else), so each kind is weighted by how reliable it has
+proved, far-off ones are ignored, and what it learned is only kept while it predicts your *next* clicks better than
+the model it would replace. `/gaze calibrate` is still there as "Recalibrate": 20 dots, then 9 fresh ones to
+measure the error. It's optional, and the one thing hints can't do: measure how far *your* eyes move.
+eval_gaze.py measures all of this on the saved clicks and dots.
 
 Features per camera frame: each iris's position inside its eye (corner-to-corner axis), eyelid opening (vertical
-gaze moves the lids), head yaw / pitch and head position. Head direction: the camera's pose is absolute but jittery;
-AirPods' is precise but drifts. They're fused: slow part from the camera, fast part from the AirPods.
+gaze moves the lids), head yaw / pitch / roll and head position. Head direction: the camera's pose is absolute but
+jittery; AirPods' is precise but drifts. They're fused: slow part from the camera, fast part from the AirPods.
 """
 import collections
 import json
 import math
+import os
 import random
 import threading
 import time
@@ -18,11 +30,13 @@ from pathlib import Path
 
 import numpy as np
 
-SAMPLES = Path(__file__).resolve().parent / "data" / "silent_chat" / "gaze_samples.npz"
-CLICKS = Path(__file__).resolve().parent / "data" / "silent_chat" / "gaze_clicks.npz"
+DATA = Path(__file__).resolve().parent / "data" / "silent_chat"
+SAMPLES = DATA / "gaze_samples.npz"  # the last explicit calibration's frames
+CLICKS = DATA / "gaze_clicks.npz"    # (older versions: clicks only; read once, to carry them over)
+PASSIVE = DATA / "gaze_passive.npz"  # every hint it learned from: stays on this Mac
 R_EYE = dict(outer=33, inner=133, upper=159, lower=145, iris=468)
 L_EYE = dict(outer=263, inner=362, upper=386, lower=374, iris=473)
-NAMES = ["rh", "rv", "ro", "lh", "lv", "lo", "yaw", "pitch", "tx", "ty", "tz"]
+NAMES = ["rh", "rv", "ro", "lh", "lv", "lo", "yaw", "pitch", "tx", "ty", "tz", "roll"]
 
 
 def _eye(P, e):
@@ -102,63 +116,340 @@ def features(landmarks, matrix, head):
     rh, rv, ro = _eye(P, R_EYE)
     lh, lv, lo = _eye(P, L_EYE)
     t = np.asarray(matrix)[:3, 3]
-    return np.array([rh, rv, ro, lh, lv, lo, head[0], head[1], t[0], t[1], t[2]], float)
+    # roll: how far the line through both eyes is tilted in the picture. The iris offsets above are measured along
+    # each eye's own axis, so when your head is tilted they have to be turned back before they mean left / down.
+    across = (P[L_EYE["outer"], :2] + P[L_EYE["inner"], :2]) / 2 - (P[R_EYE["outer"], :2] + P[R_EYE["inner"], :2]) / 2
+    roll = math.degrees(math.atan2(across[1], across[0]))
+    return np.array([rh, rv, ro, lh, lv, lo, head[0], head[1], t[0], t[1], t[2], roll], float)
 
 
-def _expand(Z):
-    """Standardised features + a few curvature terms (gaze isn't linear in iris position near the edges)."""
-    eh, ev = (Z[:, 0] + Z[:, 3]) / 2, (Z[:, 1] + Z[:, 4]) / 2
-    yaw, pitch = Z[:, 6], Z[:, 7]
-    extra = np.stack([eh * eh, ev * ev, eh * ev, eh * yaw, ev * pitch], 1)
-    return np.hstack([np.ones((len(Z), 1)), Z, extra])
+# ----------------------------------------------------------------------------- the model
+#
+# Where the gaze meets the screen, in cm from the camera (x towards the picture's right, y down), head upright:
+#     x = c0 + c1*tx + D*(c2*yaw + c3*pitch + A)
+#     y = d0 + d1*ty + D*(d2*pitch + d3*yaw + B)
+# D is the head's distance, (tx, ty) its position, and A / B how far the eyes are turned sideways / down inside the
+# head: each a weighted sum of the iris offsets and lid openings, plus a constant. Everything the eyes and head
+# contribute is an angle, so it's multiplied by the distance: lean back and the same eye movement covers more
+# screen. 22 weights: 4 offsets (c0, d0 and the constants in A and B: where "straight ahead" is) and 18 gains.
+# With the head tilted (roll), both brackets are worked out in the head's own frame and turned back by the roll,
+# so turning the camera's picture turns the answer with it (checked on real frames turned +-15 degrees).
+#
+# The two kinds are learned differently, and that is the point of this design (eval_gaze.py has the numbers):
+#   offsets  change whenever you shift in your chair, tilt the screen or the light changes, and a few hints pin
+#            them down, so every hint moves them a little: a Kalman filter over the four of them (recursive least
+#            squares that starts from a prior and lets them drift).
+#   gains    only change with your eyes and the camera. Clicks can't teach them: in about half of clicks your
+#            eyes are somewhere else, which pulls every gain towards zero (the learned gaze range shrank by ~30 %
+#            vertically, and its error on clean calibration dots doubled). So gains come from the starting
+#            weights below, and from Recalibrate, whose dots are clean.
+
+CENTRE = (-0.055, -0.07, 0.31)  # typical resting (both irises' inward offset, vertical iris offset, lid opening)
+N = 22
+OFFSETS = [0, 4, 11, 15]  # c0, A's constant, d0, B's constant
+HEAD = [1, 2, 3, 12, 13, 14]
+MINOR = [6, 7, 8, 9, 10, 18, 19, 20, 21]  # the eyes' smaller terms (differences between the eyes, cross-talk)
 
 
-# Ridge penalty per expanded column: [offset, 6 eye, yaw, pitch, tx, ty, tz, 5 curvature]. Head *position* is held
-# almost still while calibrating, so a free fit gives it a huge gain (1 cm of head bob = a third of the screen) that
-# throws the point off screen as soon as you move. Physically 1 cm of head movement moves your gaze only ~1 cm (about
-# 50 pt), less than the error, so it's left out; curvature terms are shrunk (they blow up outside the calibrated range).
-PENALTY = np.array([0] + [1] * 6 + [1, 1] + [1e5, 1e5, 1e5] + [30] * 5, float)  # (1e5: effectively left out;
-# on the first real calibration that cut fresh-point error 100 -> 80 pt and head-position sensitivity ~220 pt/cm -> 0)
-CLIP_SD = 2.5  # features are clipped to the calibrated range, +-this many sd: no wild extrapolation
+def _rows(X):
+    """Feature rows (n, 11 or 12) -> H (n, 2, 22): per frame, the two rows that multiply the weights."""
+    X = np.atleast_2d(np.asarray(X, float))
+    rh, rv, ro, lh, lv, lo, yaw, pitch, tx, ty, tz = X[:, :11].T
+    roll = np.radians(X[:, 11]) if X.shape[1] > 11 else np.zeros(len(X))  # (older saved rows have no roll)
+    D = -tz
+    eh, vg, ev = (rh - lh) / 2, (rh + lh) / 2 - CENTRE[0], (rv - lv) / 2 - CENTRE[1]  # both eyes together
+    op, vd, od = (ro + lo) / 2 - CENTRE[2], (rv + lv) / 2, (ro - lo) / 2              # ... and their differences
+    c, s = np.cos(roll), np.sin(roll)
+    # the head's turn as the head itself would call it (sideways, nodding): its two gains differ a lot, because a
+    # nod changes how the eyes look to the camera far more than a turn does, and that happens in the head's frame
+    ps, ph = np.radians(yaw), np.radians(pitch)
+    ps, ph = D * (c * ps + s * ph), D * (c * ph - s * ps)
+    one, zero = np.ones(len(X)), np.zeros(len(X))
+    A = D * np.stack([one, eh, vg, ev, op, vd, od])
+    B = D * np.stack([one, ev, op, eh, vg, vd, od])
+    Hx = np.stack([one, tx, c * ps, c * ph, *(c * A), zero, zero, -s * ph, -s * ps, *(-s * B)], 1)
+    Hy = np.stack([zero, zero, s * ps, s * ph, *(s * A), one, ty, c * ph, c * ps, *(c * B)], 1)
+    return np.stack([Hx, Hy], 1)
 
 
-class Model:
-    def __init__(self, mean, std, coef, lo=None, hi=None):
-        self.mean, self.std, self.coef = np.asarray(mean), np.asarray(std), np.asarray(coef)
-        self.lo = np.asarray(lo) if lo is not None else -CLIP_SD * np.ones(len(self.mean))
-        self.hi = np.asarray(hi) if hi is not None else CLIP_SD * np.ones(len(self.mean))
+# The starting weights, measured on one person with a MacBook Pro's camera (eval_gaze.py --prior): the eye gains
+# from clean calibration dots, the head terms from clicks made in many postures. The head terms belong to the
+# camera and MediaPipe more than to the person (MediaPipe assumes a wider lens than a Mac has, so it puts the head
+# too close and sees a turn where there's only a sideways move: that's why 1 cm of head movement counts for less
+# than 1 cm). The eye gains are personal to some degree: Recalibrate measures yours.
+#                       c0    tx    yaw   pitch | A: 1     eh    vg    ev    op    vd    od
+PRIOR_MEAN = np.array([-0.33, 0.40, 1.20, -0.10,   -0.02, 4.15, 0.15, 0.02, 0.16, 0.06, -0.25,
+                       #  d0    ty   pitch  yaw  | B: 1     ev    op    eh    vg    vd    od
+                       0.45, -0.50, 0.40, 0.40,    0.06, 6.63, -1.90, -0.17, 0.19, 0.07, 0.09])
+OFFSET_SD = np.array([1.5, 0.06, 1.5, 0.15])        # how unsure a new profile is of each offset (cm, rad, cm, rad)
+OFFSET_DRIFT = np.array([0.02, 0.0025, 0.02, 0.0025])  # how far each may wander per ~20 s: little. On clean dots
+# slow beats fast (56 pt at this rate, 81 at 3x, 102 at 6x): averaging over many noisy clicks matters more than
+# chasing the latest ones, and with the head terms right the offsets hardly move from day to day.
+# For a calibration: how far each weight may move from the starting weights (the head barely moves during one,
+# so the head terms stay; the minor eye terms are held close, or 20 dots overfit them and it shows in other
+# postures: 59 -> 52 pt on the same sitting's dots but 94 -> 117 pt on them from offsets learned elsewhere).
+CALIBRATION_SD = np.array([3.0, 1e-4, 1e-4, 1e-4,  0.12, 2.4, 0.25, 0.25, 0.25, 0.25, 0.25,
+                           3.0, 1e-4, 1e-4, 1e-4,  0.30, 5.0, 2.4, 0.25, 0.25, 0.25, 0.25])
 
-    def predict(self, X):
-        X = np.atleast_2d(X)
-        return _expand(np.clip((X - self.mean) / self.std, self.lo, self.hi)) @ self.coef
 
-    @classmethod
-    def fit(cls, X, Y, groups, lams=(0.03, 0.1, 0.3, 1, 3, 10, 30, 100)):
-        """Ridge regression; the strength is chosen by leave-one-point-out cross-validation. -> (model, cv error)."""
-        mean, std = X.mean(0), X.std(0) + 1e-6
-        Z = (X - mean) / std
-        lo, hi = Z.min(0) - CLIP_SD * 0.4, Z.max(0) + CLIP_SD * 0.4
-        A = _expand(Z)
-        best = None
-        for lam in lams:
-            errs = []
-            for g in np.unique(groups):
-                tr, te = groups != g, groups == g
-                c = _ridge(A[tr], Y[tr], lam)
-                errs.append(np.linalg.norm(np.median(A[te] @ c, 0) - Y[te][0]))
-            e = float(np.median(errs))
-            if best is None or e < best[0]:
-                best = (e, lam)
-        return cls(mean, std, _ridge(A, Y, best[1]), lo, hi), best[0]
+class Filter:
+    """The weights, and how sure it is of the four offsets (a Kalman filter over them)."""
+
+    def __init__(self, w=None, P=None, wide=1.0):
+        self.w = PRIOR_MEAN.copy() if w is None else np.asarray(w, float)
+        self.cap = (OFFSET_SD * wide) ** 2  # (wide: a screen the camera isn't built into, offsets anyone's guess)
+        self.P = np.diag(self.cap) if P is None else np.asarray(P, float)
+
+    def copy(self):
+        f = Filter(self.w.copy(), self.P.copy())
+        f.cap = self.cap.copy()
+        return f
+
+    def drift(self, steps=1.0):
+        """Time passed: be a little less sure of the offsets (never less sure than a new profile)."""
+        d = self.P.diagonal()
+        self.P[np.diag_indices(4)] = d + np.minimum(OFFSET_DRIFT ** 2 * steps, np.maximum(0.0, self.cap - d))
+
+    def reopen(self):
+        """Forget where "straight ahead" was: after it has been wrong about click after click."""
+        self.P = np.diag(self.cap)
+
+    def distance(self, H, z, R):
+        """How surprising a hint is: 0.83 is typical when everything is as believed, 3 is far out."""
+        Ho = H[:, OFFSETS]
+        nu = z - H @ self.w
+        S = Ho @ self.P @ Ho.T + R
+        return float(np.sqrt(nu @ np.linalg.solve(S, nu) / 2)), nu, S
+
+    def update(self, H, z, R, gate=2.5, soft=1.0):
+        """Learn from one hint (H: its two rows, z: the point in cm, R: how far off such hints usually are): it
+        moves the offsets. Surprising hints count less, very surprising ones not at all. -> (surprise, used)."""
+        r, nu, S = self.distance(H, z, R)
+        if r > gate:
+            return r, False
+        Ho = H[:, OFFSETS]
+        if r > soft:
+            S = Ho @ self.P @ Ho.T + R * (r / soft) ** 2
+        K = np.linalg.solve(S, Ho @ self.P).T
+        self.w[OFFSETS] = self.w[OFFSETS] + K @ nu
+        P = self.P - K @ Ho @ self.P
+        self.P = (P + P.T) / 2
+        return r, True
 
     def to_dict(self):
-        return {"mean": self.mean.tolist(), "std": self.std.tolist(), "coef": self.coef.tolist(),
-                "lo": self.lo.tolist(), "hi": self.hi.tolist()}
+        return {"w": [round(float(v), 6) for v in self.w], "P": np.round(self.P, 9).tolist(),
+                "cap": [round(float(v), 6) for v in self.cap]}
+
+    @classmethod
+    def from_dict(cls, d):
+        f = cls(d["w"], d["P"])
+        f.cap = np.asarray(d.get("cap", OFFSET_SD ** 2), float)
+        return f
 
 
-def _ridge(A, Y, lam):
-    I = np.diag(PENALTY[:A.shape[1]])  # (the offset isn't shrunk)
-    return np.linalg.solve(A.T @ A + lam * I, A.T @ Y)
+def fit_gains(H, z, mean=None, sd=CALIBRATION_SD, noise=0.7):
+    """All 22 weights from clean looks (calibration dots): least squares pulled towards the starting weights.
+    H: (n, 2, 22) rows, z: (n, 2) points in cm, noise: how far off a look at a dot is (cm)."""
+    H, z = H.reshape(-1, N), z.reshape(-1)
+    L = np.diag(1.0 / np.asarray(sd) ** 2)
+    return np.linalg.solve(H.T @ H / noise ** 2 + L, H.T @ z / noise ** 2 + L @ (PRIOR_MEAN if mean is None else mean))
+
+
+SOURCES = {  # kind of hint: how far (pt) the point it names usually is from where you were really looking
+    "dot": 35.0,       # a calibration dot you were asked to look at
+    "click": 90.0,     # something you clicked (your eyes rested on it as the cursor closed in)
+    "pursuit": 120.0,  # your eyes following the cursor while you drag or steer it
+    "appear": 150.0,   # something popped up and your eyes jumped to it (a notification, the island, a dialog)
+    "land": 170.0,     # the cursor came to rest with your eyes near it, no click
+    "caret": 190.0,    # typing, eyes near the text caret
+    "centre": 300.0,   # (a new profile only) while you're using the Mac your gaze is somewhere around mid-screen
+}
+KINDS = list(SOURCES)
+TRUSTED = {"dot", "click"}  # the cautious model learns from these only; clicks are also the judge
+WINDOW, EVERY = 30, 10      # judged on the last 30 clicks, every 10 clicks
+
+
+class SelfCalibration:
+    """One screen's gaze model. Every hint moves its offsets, and it guards itself against learning the wrong
+    thing:
+
+    fast    learns from every kind of hint
+    safe    learns from clicks and calibration dots only
+    anchor  a frozen copy of the last model that earned its place
+
+    Each click is first predicted by all three (so the errors are on clicks none of them has learned from), then
+    learned. Every 10 clicks the last 30 errors are compared: the better learner goes live; it replaces the anchor
+    only if it beats it, and if the anchor beats both learners they are rolled back to it. `notes` collects what
+    was decided (for the log)."""
+
+    def __init__(self, geom):
+        self.geom = dict(geom)
+        wide = 1.0 if geom.get("builtin", True) else 4.0
+        self.fast, self.safe, self.anchor = Filter(wide=wide), Filter(wide=wide), Filter(wide=wide)
+        self.cap = self.fast.cap.copy()
+        self.live, self.errs, self.judged, self.t, self.misses = "fast", collections.deque(maxlen=WINDOW), 0, None, 0
+        self.n = {k: [0, 0] for k in KINDS}  # per kind: hints seen, hints used
+        self.trust = {k: 1.0 for k in KINDS}  # per kind: its distance above, scaled by how it has really done
+        self.calibrated, self.notes, self.kept = None, [], 0
+
+    # -- geometry: screen points (y down from the main screen's top) <-> cm from the camera
+    def _cm(self, p):
+        k = self.geom["mm_per_pt"] / 10.0
+        cam = self.geom["cam"]
+        return np.array([-(p[0] - cam[0]) * k, (p[1] - cam[1]) * k])
+
+    def _pt(self, cm):
+        k = 10.0 / self.geom["mm_per_pt"]
+        cam = self.geom["cam"]
+        cm = np.atleast_2d(cm)
+        return np.stack([cam[0] - cm[:, 0] * k, cam[1] + cm[:, 1] * k], 1)
+
+    def model(self, name=None):
+        return getattr(self, name or self.live)
+
+    def predict(self, X, name=None):
+        """Feature rows -> gaze points (n, 2) in screen points."""
+        return self._pt(_rows(X) @ self.model(name).w)
+
+    def contains(self, x, y):
+        q = self.geom["screen"]
+        return q[0] <= x <= q[0] + q[2] and q[1] <= y <= q[1] + q[3]
+
+    @property
+    def used(self):
+        return sum(v[1] for k, v in self.n.items() if k != "centre")
+
+    @property
+    def warm(self):
+        """Has it learned enough to be worth acting on? (a calibration, or a handful of hints it believed)"""
+        return self.calibrated is not None or self.used >= 8
+
+    @property
+    def radius(self):
+        """How far off it typically is (screen points): the snapping radius. From its error on recent clicks
+        before it learned from them; about half of clicks are made with the eyes elsewhere, so it's the lower
+        third of those errors that says how good the gaze is (on clean dots it measured ~50 pt when this said
+        ~85)."""
+        col = {"fast": 0, "safe": 1, "anchor": 2}[self.live]
+        recent = [e[col] for e in self.errs]
+        if len(recent) >= 8:
+            r = float(np.percentile(recent, 30))
+        elif self.calibrated:
+            r = float(self.calibrated["look_error_pt"]) * 1.3
+        else:
+            r = 160.0 if self.warm else 220.0
+        if self.calibrated and time.time() - self.calibrated.get("at", 0) < 600:
+            r = min(r, float(self.calibrated["look_error_pt"]) * 1.3)  # (just calibrated: believe the measurement)
+        return float(min(300.0, max(50.0, r)))
+
+    def learn(self, x, y, src, t=None, sig=None):
+        """One hint: features x while you were (probably) looking at screen point y. t: seconds (any clock that
+        keeps running), for how much the model may have drifted since the last hint. sig: (x, y) spread in points
+        when this hint knows better than its kind's usual. -> (the live model's error on it in points, before
+        learning from it; whether it was believed)."""
+        H, z = _rows(x)[0], self._cm(y)
+        s = sig or (SOURCES[src], SOURCES[src])
+        k = self.geom["mm_per_pt"] / 10.0 * self.trust[src]
+        R = np.diag([(s[0] * k) ** 2, (s[1] * k) ** 2])
+        y = np.asarray(y, float)
+        err = float(np.linalg.norm(self._pt(H @ self.model().w)[0] - y))
+        steps = 1.0 if t is None or self.t is None else min(30.0, max(0.0, (t - self.t) / 20.0))
+        self.t = t if t is not None else self.t
+        if src == "click":  # the judge: scored by all three before any of them learns from it
+            self.errs.append([float(np.linalg.norm(self._pt(H @ m.w)[0] - y))
+                              for m in (self.fast, self.safe, self.anchor)])
+            self.judged += 1
+        gate, soft = (1e9, 1e9) if src == "dot" else (2.5, 1.0)
+        self.fast.drift(steps)
+        self.safe.drift(steps)
+        r, used = self.fast.update(H, z, R, gate, soft)
+        if src in TRUSTED:
+            self.safe.update(H, z, R, gate, soft)
+        self.n[src][0] += 1
+        self.n[src][1] += used
+        if src not in ("dot", "centre") and self.used >= 25:  # how this kind of hint really does, slowly
+            surprise = max(-1.0, min(1.5, math.log(max(r, 0.05) / 0.83)))  # (0 when it's as far off as expected)
+            self.trust[src] = float(min(2.5, max(0.7, self.trust[src] * math.exp(0.04 * surprise))))
+        if src == "click":
+            self.misses = 0 if used else self.misses + 1
+            if self.misses >= 5:  # wrong about five clicks in a row: you've moved, or it has lost the plot
+                self.fast.reopen()
+                self.safe.reopen()
+                self.misses = 0
+                self.notes.append({"reopened": True, "clicks": self.judged})
+            if self.judged % EVERY == 0 and len(self.errs) >= 12:
+                self._referee()
+        return err, used
+
+    def _referee(self):
+        med = dict(zip(("fast", "safe", "anchor"), np.median(np.array(self.errs), 0)))
+        best = "fast" if med["fast"] <= med["safe"] * 1.03 else "safe"
+        note = {"clicks": self.judged, **{k + "_pt": round(float(v), 1) for k, v in med.items()}}
+        if med["fast"] > med["safe"] * 1.15:  # the other kinds of hint are leading it astray: drop what they taught
+            self.fast = self.safe.copy()
+            for k in KINDS:
+                if k not in TRUSTED:
+                    self.trust[k] = min(2.5, self.trust[k] * 1.3)
+            note["fast_reset"] = True
+        if med[best] < med["anchor"] * 0.95:  # it earned its place
+            self.anchor, self.live, self.kept = getattr(self, best).copy(), best, self.kept + 1
+            note["kept"] = True
+        elif med["anchor"] < med[best] * 0.87:  # learning made it worse than the copy that learned nothing
+            self.fast, self.safe, self.live = self.anchor.copy(), self.anchor.copy(), "fast"
+            for f in (self.fast, self.safe):
+                f.drift(30.0)
+            note["rolled_back"] = True
+        else:
+            self.live = best
+        note["live"] = self.live
+        self.notes.append(note)
+
+    def calibrate(self, fit, test):
+        """An explicit calibration. fit / test: per dot (its frames' features (n, 12), x, y). The gains and
+        offsets are fitted to the fit dots; the test dots are predicted with that (the real error), and then
+        used as well. -> result."""
+        def solve(dots_):
+            X = np.array([np.median(X, 0) for X, _, _ in dots_])
+            return fit_gains(_rows(X), np.array([self._cm((x, y)) for _, x, y in dots_]))
+
+        probe = Filter(solve(fit))
+        per_frame, per_look = [], []
+        for X, x, y in test:
+            P = self._pt(_rows(X) @ probe.w)
+            per_frame += list(np.linalg.norm(P - np.array([x, y]), axis=1))
+            per_look.append(float(np.linalg.norm(np.median(P, 0) - np.array([x, y]))))
+        w = solve(list(fit) + list(test))
+        sure = np.diag((OFFSET_SD / 4) ** 2)  # (just measured: the offsets are known, until time passes)
+        self.fast, self.safe, self.anchor = (Filter(w.copy(), sure.copy()) for _ in range(3))
+        for f in (self.fast, self.safe, self.anchor):
+            f.cap = self.cap.copy()
+        self.live, self.misses = "fast", 0
+        self.n["dot"] = [self.n["dot"][0] + len(fit) + len(test)] * 2
+        self.calibrated = {
+            "look_error_pt": float(np.median(per_look)), "look_error_mean_pt": float(np.mean(per_look)),
+            "look_error_max_pt": float(np.max(per_look)), "frame_error_pt": float(np.median(per_frame)),
+            "within_100pt": float(np.mean(np.array(per_look) < 100)), "looks": per_look, "n_fit": len(fit),
+            "date": time.strftime("%Y-%m-%d %H:%M"), "at": time.time()}
+        return {**self.calibrated, "screen": list(self.geom["screen"]), "display": self.geom.get("display"),
+                "mm_per_pt": self.geom["mm_per_pt"]}
+
+    def to_dict(self):
+        return {"geom": self.geom, "fast": self.fast.to_dict(), "safe": self.safe.to_dict(),
+                "anchor": self.anchor.to_dict(), "live": self.live, "errs": [[round(v, 1) for v in e] for e in self.errs],
+                "judged": self.judged, "t": self.t, "n": self.n, "trust": self.trust, "calibrated": self.calibrated,
+                "kept": self.kept}
+
+    @classmethod
+    def from_dict(cls, d, geom=None):
+        c = cls(geom or d["geom"])
+        c.fast, c.safe, c.anchor = (Filter.from_dict(d[k]) for k in ("fast", "safe", "anchor"))
+        c.cap = c.fast.cap.copy()
+        c.live, c.judged, c.t, c.kept = d.get("live", "fast"), d.get("judged", 0), d.get("t"), d.get("kept", 0)
+        c.errs.extend(d.get("errs", []))
+        c.n.update({k: list(v) for k, v in d.get("n", {}).items() if k in c.n})
+        c.trust.update({k: float(v) for k, v in d.get("trust", {}).items() if k in c.trust})
+        c.calibrated = d.get("calibrated")
+        return c
 
 
 class OneEuro:
@@ -290,11 +581,38 @@ class ScreenLayer:
         self.win.orderOut_(None)
 
 
-# ----------------------------------------------------------------------------- calibration
+
+
+def geometry(scr, every=None):
+    """Where the camera is relative to a screen (one of screens()): in the notch of a built-in display, or just
+    above one without a notch. A screen the camera isn't built into gets the built-in display's camera, wherever
+    the Displays arrangement puts it (or, with no built-in display, a webcam sitting on top of it): only a rough
+    guess, so that screen's model starts wide open and finds its own offsets."""
+    import Quartz
+    from AppKit import NSScreen
+
+    def camera(s):
+        ns = next((n for n in NSScreen.screens() if int(n.deviceDescription()["NSScreenNumber"]) == s[3]), None)
+        top = ns.safeAreaInsets().top if ns is not None else 0.0
+        return [s[1][0] + s[1][2] / 2, s[1][1] + (top / 2 if top > 0 else -6.0 / (s[2] or 0.25))]
+
+    _, q, mm, did = scr
+    mm = mm or 0.25
+    builtin = bool(Quartz.CGDisplayIsBuiltin(did))
+    if builtin:
+        cam = camera(scr)
+    else:
+        b = next((s for s in (every or screens()) if Quartz.CGDisplayIsBuiltin(s[3])), None)
+        cam = camera(b) if b is not None else [q[0] + q[2] / 2, q[1] - 8.0 / mm]
+    return {"screen": [float(v) for v in q], "display": int(did), "mm_per_pt": float(mm),
+            "cam": [float(cam[0]), float(cam[1])], "builtin": builtin}
+
+
+# ----------------------------------------------------------------------------- calibration (optional)
 
 class Calibration:
     """Shows dots one at a time on the screen under the mouse. 20 to learn from, then 9 new ones to measure the real
-    error (never used for fitting). ~60 s. step() each camera frame; .result when done."""
+    error (predicted before they're learned). ~60 s. step() each camera frame; .fit / .test (or .error) when done."""
 
     SHOW, SETTLE = 1.7, 0.7  # seconds per dot; samples are taken after the eyes have landed
 
@@ -310,7 +628,8 @@ class Calibration:
         self.points = [("fit", qx + u * qw, qy + v * qh) for u, v in fit] + \
                       [("test", qx + u * qw, qy + v * qh) for u, v in test]
         self.layer = ScreenLayer(self.screen)
-        self.i, self.t0, self.samples, self.result, self.intro = 0, None, [], None, None
+        self.i, self.t0, self.samples, self.intro = 0, None, [], None
+        self.fit, self.test, self.error = None, None, None
 
     def step(self, now, feats):
         """feats: this frame's feature vector or None (blink / no face). False when finished."""
@@ -341,58 +660,27 @@ class Calibration:
     def finish(self, save=True):
         if self.layer is not None:
             self.layer.close()
-        fit = [s for s in self.samples if s[1] == "fit"]
-        test = [s for s in self.samples if s[1] == "test"]
-        if len({s[0] for s in fit}) < 12 or len({s[0] for s in test}) < 5:
-            self.result = {"error": "Not enough clear looks at the dots (face not visible, or eyes closed)."}
+        s = self.samples
+        if len({i for i, k, *_ in s if k == "fit"}) < 12 or len({i for i, k, *_ in s if k == "test"}) < 5:
+            self.error = "Not enough clear looks at the dots (face not visible, or eyes closed)."
             return
-        try:  # (kept, so the model can be re-tuned without calibrating again: refit())
-            if not save:
-                raise OSError
-            np.savez(SAMPLES, X=np.array([s[4] for s in self.samples]), Y=np.array([[s[2], s[3]] for s in self.samples]),
-                     g=np.array([s[0] for s in self.samples]), test=np.array([s[1] == "test" for s in self.samples]))
-        except OSError:
-            pass
-        X, Y = np.array([s[4] for s in fit]), np.array([[s[2], s[3]] for s in fit])
-        X, Y, g = _clean(X, Y, np.array([s[0] for s in fit]))
-        model, cv = Model.fit(X, Y, g)
-        # the real test: points it never saw. Per frame (raw), and per look (median over the look, what "this" uses)
-        per_frame, per_look = [], []
-        for i in sorted({s[0] for s in test}):
-            rows = [s for s in test if s[0] == i]
-            P = model.predict(np.array([s[4] for s in rows]))
-            target = np.array([rows[0][2], rows[0][3]])
-            per_frame += list(np.linalg.norm(P - target, axis=1))
-            per_look.append(float(np.linalg.norm(np.median(P, 0) - target)))
-        mm = self.mm
-        self.result = {"model": model.to_dict(), "screen": self.screen[1], "display": self.screen[3],
-                       "mm_per_pt": mm, "cv_error_pt": cv, "n_fit": len(X),
-                       "look_error_pt": float(np.median(per_look)), "look_error_mean_pt": float(np.mean(per_look)),
-                       "look_error_max_pt": float(np.max(per_look)), "frame_error_pt": float(np.median(per_frame)),
-                       "within_100pt": float(np.mean(np.array(per_look) < 100)), "looks": per_look,
-                       "date": time.strftime("%Y-%m-%d %H:%M")}
+        X, Y = np.array([r[4] for r in s]), np.array([[r[2], r[3]] for r in s])
+        g, test = np.array([r[0] for r in s]), np.array([r[1] == "test" for r in s])
+        if save:  # (kept, so the accuracy can be measured again after the model changes: eval_gaze.py)
+            try:
+                np.savez(SAMPLES, X=X, Y=Y, g=g, test=test)
+            except OSError:
+                pass
+        self.fit, self.test = dots(X[~test], Y[~test], g[~test]), dots(X[test], Y[test], g[test])
 
     def cancel(self):
         self.layer.close()
 
 
-def refit(path):
-    """Fit again from the last calibration's saved frames (after changing the model), without calibrating again.
-    Rewrites gaze.json and logs the new result. -> result dict."""
-    z = np.load(SAMPLES)
-    c = Calibration.__new__(Calibration)
-    d = json.loads(Path(path).read_text())
-    scr = next((s for s in screens() if s[3] == d.get("display")), None) or (None, tuple(d["screen"]), d["mm_per_pt"], d.get("display"))
-    c.screen, c.mm, c.layer = scr, d["mm_per_pt"], None
-    c.samples = [(int(i), "test" if t else "fit", float(y[0]), float(y[1]), x) for x, y, i, t in zip(z["X"], z["Y"], z["g"], z["test"])]
-    c.finish(save=False)
-    r = c.result
-    if "model" in r:
-        r["refit_of"] = d.get("date")
-        Path(path).write_text(json.dumps(r))
-        with open(Path(path).with_name("gaze_eval.log"), "a") as f:
-            f.write(json.dumps({k: v for k, v in r.items() if k != "model"}) + "\n")
-    return r
+def dots(X, Y, g):
+    """Calibration frames -> per dot (its frames' features, x, y), without blinks and glances away."""
+    X, Y, g = _clean(X, Y, g)
+    return [(X[g == i], float(Y[g == i][0][0]), float(Y[g == i][0][1])) for i in np.unique(g)]
 
 
 def _clean(X, Y, g):
@@ -416,39 +704,145 @@ def describe(r):
             f"{cm(r['look_error_max_pt'])}; {r['within_100pt']:.0%} of looks within 100 pt")
 
 
+def carry_over(geom, samples=SAMPLES, clicks=CLICKS, date=None):
+    """A model from what an older version saved (its last calibration's frames, then its clicks, in that order),
+    so nobody starts again from nothing. -> SelfCalibration, or None when there's nothing saved."""
+    cal, found = SelfCalibration(geom), False
+    try:
+        z = np.load(samples)
+        t = z["test"]
+        cal.calibrate(dots(z["X"][~t], z["Y"][~t], z["g"][~t]), dots(z["X"][t], z["Y"][t], z["g"][t]))
+        cal.calibrated.update(at=0.0, date=date or cal.calibrated["date"])  # (measured then, not now)
+        found = True
+    except (OSError, KeyError, ValueError, IndexError):
+        pass
+    try:
+        z = np.load(clicks)
+        for x, y in zip(z["X"], z["Y"]):
+            if cal.contains(*y):
+                cal.learn(x, y, "click")
+                found = True
+    except (OSError, KeyError, ValueError):
+        pass
+    cal.notes.clear()
+    return cal if found else None
+
+
 # ----------------------------------------------------------------------------- live
 
-class Gaze:
-    """Live gaze from each camera frame. .point(t0, t1) -> median gaze (x, y) in screen points over that time."""
+class SampleLog:
+    """Every hint it learned from, kept on this Mac (never sent anywhere) so the accuracy can be measured later
+    (eval_gaze.py) and the model rebuilt after a change: the features, the point, the kind of hint, when, on which
+    display, how far off the model was just before learning it, and whether it believed it. Clicks also keep the
+    second of features before them (gaze_traces.npz), to tune which moment before a click to trust."""
+
+    KEEP, TRACES, LENGTH = 6000, 1200, 40
 
     def __init__(self, path):
-        self.path, self.model, self.info = Path(path), None, {}
-        self.head, self.filter = HeadFusion(), OneEuro()
-        self.hist = collections.deque(maxlen=300)  # (t, x, y)
-        self.last_feats, self.calib, self.layer, self.show_until = None, None, None, 0.0
-        self.lens, self.lens_on, self.warp_on = None, False, False  # the glass circle that follows your gaze
-        # free calibration from your clicks: you look at what you click, so each click is a labelled example
-        self.feat_hist = collections.deque(maxlen=60)  # (t, features) for the last ~2 s
-        self.clicks, self.refit_at, self.click_note, self.learn_clicks = [], 0, None, True
+        self.path, self.rows, self.traces, self.dirty = Path(path), [], [], False
         try:
-            z = np.load(CLICKS)
-            self.clicks = [(f, float(x), float(y)) for f, (x, y) in zip(z["X"], z["Y"])]
-            self.refit_at = len(self.clicks)
+            z = np.load(self.path)
+            self.rows = [(x, y, int(s), float(t), int(d), float(e), bool(u)) for x, y, s, t, d, e, u in
+                         zip(z["X"], z["Y"], z["src"], z["t"], z["display"], z["err"], z["used"])]
         except (OSError, KeyError, ValueError):
             pass
         try:
-            d = json.loads(self.path.read_text())
-            self.model, self.info = Model(**d["model"]), d
-        except (OSError, ValueError, KeyError):
+            z = np.load(self.path.with_name("gaze_traces.npz"))
+            self.traces = list(zip(z["T"], z["t"], z["Y"]))
+        except (OSError, KeyError, ValueError):
             pass
+
+    def add(self, x, y, src, t, display, err, used, trace=None):
+        x = np.asarray(x, np.float32)
+        self.rows = self.rows[-self.KEEP + 1:] + [(x, np.asarray(y, np.float32), KINDS.index(src), t, display, err, used)]
+        if trace is not None and len(trace):
+            T = np.full((self.LENGTH, len(NAMES) + 1), np.nan, np.float32)
+            tr = np.asarray(trace, np.float32)[-self.LENGTH:]
+            T[:len(tr)] = tr
+            self.traces = self.traces[-self.TRACES + 1:] + [(T, t, np.asarray(y, np.float32))]
+        self.dirty = True
+
+    def save(self):
+        if not self.dirty or not self.rows:
+            return
+        try:
+            r = self.rows
+            np.savez(self.path, X=np.array([a[0] for a in r]), Y=np.array([a[1] for a in r]),
+                     src=np.array([a[2] for a in r], np.int8), t=np.array([a[3] for a in r]),
+                     display=np.array([a[4] for a in r], np.int64), err=np.array([a[5] for a in r], np.float32),
+                     used=np.array([a[6] for a in r]), kinds=np.array(KINDS))
+            if self.traces:
+                np.savez(self.path.with_name("gaze_traces.npz"), T=np.array([a[0] for a in self.traces]),
+                         t=np.array([a[1] for a in self.traces]), Y=np.array([a[2] for a in self.traces]))
+            self.dirty = False
+        except OSError:
+            pass
+
+
+class Gaze:
+    """Live gaze from each camera frame. .point(t0, t1) -> median gaze (x, y) in screen points over that time.
+    .learn(hint) is how it calibrates itself (the hints come from gaze_passive.Teacher)."""
+
+    def __init__(self, path, log=PASSIVE):
+        self.path = Path(path)
+        self.head, self.filter = HeadFusion(), OneEuro()
+        self.hist = collections.deque(maxlen=300)  # (t, x, y)
+        self.last_feats, self.raw, self.calib, self.layer, self.show_until = None, None, None, None, 0.0
+        self.lens, self.lens_on, self.warp_on = None, False, False  # the glass circle that follows your gaze
+        self.learning = True  # Settings > "Learn gaze as I work"
+        self.cals, self.cal = {}, None  # a model per display; the one for the screen you're on
+        self.log = SampleLog(log) if log else None
+        self.checked, self.saved, self.dirty = -99.0, time.monotonic(), False
+        try:
+            d = json.loads(self.path.read_text())
+        except (OSError, ValueError):
+            d = {}
+        for key, c in (d.get("cals") or {}).items():
+            try:
+                self.cals[key] = SelfCalibration.from_dict(c)
+            except (KeyError, ValueError, TypeError):
+                pass
+        self.old = d if "model" in d and not self.cals else None  # (an older version's calibration: carried over)
 
     @property
     def ready(self):
-        return self.model is not None
+        return self.cal is not None
+
+    @property
+    def warm(self):
+        """Learned enough to act on (peeking at the notch, telling Claude what you looked at)."""
+        return self.cal is not None and self.cal.warm
+
+    @property
+    def radius(self):
+        """How far off it typically is (screen points): the snapping radius."""
+        return self.cal.radius if self.cal is not None else 220.0
+
+    def _screen(self, t):
+        """The model for the screen you're on (the one with the mouse), made the first time it's needed."""
+        if t - self.checked < 2.0:
+            return self.cal
+        self.checked = t
+        try:
+            every = screens()
+            scr = screen_under_mouse()
+            key, geom = str(scr[3]), geometry(scr, every)
+        except Exception:
+            return self.cal
+        cal = self.cals.get(key)
+        if cal is None:
+            cal = (carry_over(geom, date=self.old.get("date")) if self.old and self.old.get("display") == scr[3]
+                   else None) or SelfCalibration(geom)
+            self.cals[key], self.old, self.dirty = cal, None, True
+        elif cal.geom != geom:  # (resolution or arrangement changed: the weights are in cm, so they still hold)
+            cal.geom = geom
+        if cal is not self.cal:
+            self.cal, self.filter = cal, OneEuro()
+        return cal
 
     def update(self, t, landmarks, matrix, blend, airpods=None):
         """airpods: (t, pitch, yaw, roll) degrees, or None."""
-        self.last_feats = None
+        self.last_feats = self.raw = None
         if landmarks is None or matrix is None:
             return self._lens(t, None)
         if (blend.get("eyeBlinkLeft", 0) + blend.get("eyeBlinkRight", 0)) / 2 > 0.45:
@@ -458,13 +852,13 @@ class Gaze:
         head = self.head.update(t, cam, ap)
         f = features(landmarks, matrix, head)
         self.last_feats = f
-        if f is not None:
-            self.feat_hist.append((t, f))
-        if self.calib is not None or self.model is None or f is None:
+        cal = self._screen(t)
+        if self.calib is not None or cal is None or f is None:
             return self._lens(t, None)
-        px, py = self.model.predict(f)[0]
-        q = self.info.get("screen") or (0, 0, 1e5, 1e5)
-        m = 0.05 * min(q[2], q[3])  # (kept on the calibrated screen, give or take a little)
+        px, py = cal.predict(f)[0]
+        self.raw = (float(px), float(py))  # (as predicted: may be off the screen, when you look away)
+        q = cal.geom["screen"]
+        m = 0.05 * min(q[2], q[3])  # (kept on the screen, give or take a little)
         px, py = min(max(px, q[0] - m), q[0] + q[2] + m), min(max(py, q[1] - m), q[1] + q[3] + m)
         x, y = self.filter(t, (px, py))
         self.hist.append((t, float(x), float(y)))
@@ -476,72 +870,83 @@ class Gaze:
             else:
                 lx, ly = self.layer.to_local(x, y)
                 self.layer.show(dots=[(lx, ly, 22, "ring")])
+        if self.dirty and t - self.saved > 60:
+            self.save()
 
     def _lens(self, t, p):
-        if not self.lens_on or self.calib is not None or self.model is None:
+        if not self.lens_on or self.calib is not None or self.cal is None:
             return self.hide_lens()
         if self.lens is None:
             self.lens = GlassLens(hold=max(40.0, 0.5 * self.radius), warp=self.warp_on and Warper.allowed())
         self.lens.update(t, p)
 
-    def add_click(self, t, x, y):
-        """A click at screen point (x, y), y down. Uses where your eyes were just before it (0.05-0.45 s) as a new
-        calibration example, if it was on the calibrated screen and roughly where gaze said you were looking (a
-        blind click, e.g. while reading something else, is skipped). Every 10 new clicks it refits and keeps the
-        new model only if it's more accurate on clicks it didn't train on. -> a note when it improved, else None."""
-        if self.model is None or self.calib is not None or not self.learn_clicks:
+    def learn(self, hint):
+        """A moment it can guess where you were looking: {"x": features, "y": (x, y) screen point, "src": the kind
+        (SOURCES), "sig": (x, y) spread in points or None, "trace": the features leading up to it or None}.
+        -> a note when what it learned earned its place (or was thrown out), else None."""
+        if not self.learning or self.calib is not None:
             return None
-        q = self.info.get("screen")
-        if not q or not (q[0] <= x <= q[0] + q[2] and q[1] <= y <= q[1] + q[3]):
+        cal = next((c for c in self.cals.values() if c.contains(*hint["y"])), None)
+        if cal is None or (hint["src"] == "centre" and cal.warm):
             return None
-        fs = [f for tt, f in self.feat_hist if t - 0.45 <= tt <= t - 0.05]
-        if len(fs) < 4:
-            return None
-        f = np.median(np.array(fs), 0)
-        if np.linalg.norm(self.model.predict(f)[0] - np.array([x, y])) > max(300.0, 3 * self.radius):
-            return None
-        self.clicks.append((f, float(x), float(y)))
-        self.clicks = self.clicks[-400:]
-        if len(self.clicks) >= 20 and len(self.clicks) - self.refit_at >= 10:
-            self.refit_at = len(self.clicks)
-            return self.refit_with_clicks()
-        return None
+        err, used = cal.learn(hint["x"], hint["y"], hint["src"], t=time.time(), sig=hint.get("sig"))
+        if self.log is not None:
+            self.log.add(hint["x"], hint["y"], hint["src"], time.time(), cal.geom.get("display", 0), err, used,
+                         hint.get("trace"))
+        self.dirty = True
+        return self._notes(cal)
 
-    def refit_with_clicks(self):
-        """Calibration frames + your clicks -> a new model, judged on the newest quarter of the clicks."""
+    def _notes(self, cal):
+        out = None
+        for n in cal.notes:
+            try:
+                with open(self.path.with_name("gaze_eval.log"), "a") as fh:
+                    fh.write(json.dumps({"self_calibration": {"date": time.strftime("%Y-%m-%d %H:%M"), **n}}) + "\n")
+            except OSError:
+                pass
+            mm = cal.geom["mm_per_pt"]
+            if n.get("kept"):
+                e = n[n["live"] + "_pt"]
+                out = (f"Gaze tuned itself from what you clicked and looked at: {n['anchor_pt']:.0f} -> {e:.0f} pt "
+                       f"({e * mm / 10:.1f} cm) on clicks it hadn't seen.")
+            elif n.get("rolled_back"):
+                out = "Gaze: what it learned lately made it worse on your clicks, so it went back to the last good model."
+        cal.notes.clear()
+        return out
+
+    def save(self):
+        """The models and the hint log, to disk (also called every minute while there's something new)."""
+        self.saved, self.dirty = time.monotonic(), False
         try:
-            np.savez(CLICKS, X=np.array([c[0] for c in self.clicks]), Y=np.array([c[1:] for c in self.clicks]))
-            z = np.load(SAMPLES)
-        except (OSError, KeyError, ValueError):
-            return None
-        n_test = max(5, len(self.clicks) // 4)
-        train, test = self.clicks[:-n_test], self.clicks[-n_test:]
-        fit = ~z["test"]
-        X, Y, g = _clean(z["X"][fit], z["Y"][fit], z["g"][fit])
-        cX = np.array([c[0] for c in train])
-        cY = np.array([c[1:] for c in train])
-        cg = 1000 + np.arange(len(train))
-        rep = 4  # (a click is one look; a calibration dot is ~20 frames: weight clicks up a little)
-        X2 = np.vstack([X] + [cX] * rep)
-        Y2 = np.vstack([Y] + [cY] * rep)
-        g2 = np.concatenate([g] + [cg] * rep)
-        new, _ = Model.fit(X2, Y2, g2)
-        tX, tY = np.array([c[0] for c in test]), np.array([c[1:] for c in test])
-        old_err = float(np.median(np.linalg.norm(self.model.predict(tX) - tY, axis=1)))
-        new_err = float(np.median(np.linalg.norm(new.predict(tX) - tY, axis=1)))
-        entry = {"date": time.strftime("%Y-%m-%d %H:%M"), "clicks": len(self.clicks), "old_click_error_pt": old_err,
-                 "new_click_error_pt": new_err, "kept": new_err < old_err * 0.95}
-        with open(self.path.with_name("gaze_eval.log"), "a") as fh:
-            fh.write(json.dumps({"click_refit": entry}) + "\n")
-        if not entry["kept"]:
-            return None
-        self.model = new
-        self.info.update(model=new.to_dict(), look_error_pt=min(self.info.get("look_error_pt", new_err), new_err),
-                         click_refits=self.info.get("click_refits", 0) + 1, click_error_pt=new_err)
-        self.path.write_text(json.dumps(self.info))
-        mm = self.info.get("mm_per_pt") or 0
-        return (f"Gaze tuned from your clicks: {old_err:.0f} -> {new_err:.0f} pt"
-                + (f" ({new_err * mm / 10:.1f} cm)" if mm else "") + " on clicks it hadn't seen.")
+            tmp = self.path.with_suffix(".tmp")
+            tmp.write_text(json.dumps({"v": 2, "date": time.strftime("%Y-%m-%d %H:%M"),
+                                       "cals": {k: c.to_dict() for k, c in self.cals.items()}}))
+            os.replace(tmp, self.path)
+        except OSError:
+            pass
+        if self.log is not None:
+            self.log.save()
+
+    def reset(self):
+        """Forget what it learned about the eyes in front of this screen (someone else is using the Mac, or it has
+        gone wrong): back to the starting weights. The hint log is kept."""
+        if self.cal is not None:
+            key = next(k for k, c in self.cals.items() if c is self.cal)
+            self.cal = self.cals[key] = SelfCalibration(self.cal.geom)
+            self.filter, self.dirty = OneEuro(), True
+            self.save()
+
+    def status(self):
+        """One line: how well it's doing and what it has learned from."""
+        c = self.cal
+        if c is None:
+            return "waiting to see your face"
+        mm = c.geom["mm_per_pt"]
+        seen = ", ".join(f"{v[1]} {k}" for k, v in c.n.items() if v[1] and k != "centre")
+        cal = f"calibrated {c.calibrated['date']}: {describe({**c.calibrated, 'mm_per_pt': mm})}" if c.calibrated \
+            else "never calibrated (it doesn't need it)"
+        return (f"typically within ~{c.radius:.0f} pt ({c.radius * mm / 10:.1f} cm); learned from {seen or 'nothing yet'}"
+                f"; {c.kept} refits kept; {cal}")
 
     def hide_lens(self):
         if self.lens is not None:
@@ -556,9 +961,9 @@ class Gaze:
 
     def show(self, seconds=20):
         """Draw a ring where it thinks you're looking, for a while (to see how well it works)."""
-        if self.model is None:
+        if self.cal is None:
             return
-        scr = next((s for s in screens() if s[3] == self.info.get("display")), screens()[0])
+        scr = next((s for s in screens() if s[3] == self.cal.geom.get("display")), screens()[0])
         if self.layer is None:
             self.layer = ScreenLayer(scr)
         self.show_until = time.monotonic() + seconds
@@ -572,24 +977,28 @@ class Gaze:
             return None
         if self.calib.step(now, self.last_feats):
             return None
-        r, self.calib = self.calib.result, None
-        if "model" in r:
-            self.path.write_text(json.dumps(r))
-            self.model, self.info = Model(**r["model"]), r
-            self.filter, self.hist = OneEuro(), collections.deque(maxlen=300)
+        calib, self.calib = self.calib, None
+        if calib.error:
+            return {"error": calib.error}
+        key = str(calib.screen[3])
+        cal = self.cals.get(key)
+        if cal is None:
+            cal = self.cals[key] = SelfCalibration(geometry(calib.screen))
+        r = cal.calibrate(calib.fit, calib.test)
+        cal.notes.clear()
+        self.cal, self.filter, self.hist = cal, OneEuro(), collections.deque(maxlen=300)
+        self.save()
+        try:
             with open(self.path.with_name("gaze_eval.log"), "a") as f:
-                f.write(json.dumps({k: v for k, v in r.items() if k != "model"}) + "\n")
+                f.write(json.dumps(r) + "\n")
+        except OSError:
+            pass
         return r
 
     def cancel_calibration(self):
         if self.calib is not None:
             self.calib.cancel()
             self.calib = None
-
-    @property
-    def radius(self):
-        """How far off it typically is (screen points): the snapping radius."""
-        return float(self.info.get("look_error_pt", 150))
 
 
 # ----------------------------------------------------------------------------- the glass indicator

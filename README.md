@@ -37,7 +37,7 @@ apps, names and messages are made up.</sub></p>
 | 🖥️ **Uses your apps** | Opens chats, drafts messages, arranges windows, runs Todoist and Spotify (in the background). It asks before sending, deleting or buying. |
 | 👀 **Knows your screen** | Each message carries a short summary of the window in front, so “what is this?” or “press Send” needs no extra look. |
 | 🔒 **Keeps private things private** | A check on your Mac holds back banking, health, password and ID windows, and blanks card numbers, codes and keys, before anything reaches Claude. |
-| 🎯 **Knows where you look** | Eye tracking (steadied by your AirPods) tells Claude what you were looking at as you spoke, with a subtle glass lens showing where. |
+| 🎯 **Knows where you look** | Eye tracking with no calibration step: it teaches itself from what you click, type and look at, steadied by your AirPods. It tells Claude what you were looking at as you spoke, with a subtle glass lens showing where. |
 | ⚡ **Instant commands** | “Pause”, “next song”, “open Discord”, a button's name or a saved shortcut runs in a fraction of a second, with no model. |
 | 🌱 **Builds its own features** | Learns shortcuts and per-app tips from how you use it, tweaks the ones you use, and removes ones you haven't used for 7 days. |
 | 🔔 **Notifications** | New ones drop down from the notch; say “reply …” and Claude drafts it, then asks. |
@@ -106,13 +106,15 @@ to turn the camera on.
 | Tap <kbd>\\</kbd> while Claude is working | Stop it |
 | Menu bar > Settings… | Every switch in one place |
 
-<p align="center"><img src="docs/settings.png" width="420" alt="The Settings window: switches for hands-free, Hey Claude, spoken replies, the notch, screen and gaze awareness, the glass lens, notifications, self-improvement and face gestures, plus the Claude model"></p>
+<p align="center"><img src="docs/settings.png" width="420" alt="The Settings window: switches for hands-free, Hey Claude, spoken replies, the notch, screen and gaze awareness, the glass lens, notifications, self-improvement, face gestures and learning gaze as you work, plus the Claude model and buttons to practise, recalibrate gaze and show stats"></p>
 
 ## Privacy
 
 Lip-reading, face and eye tracking, the wake word, speech-to-text, the hands-free model and the privacy check run
 on your Mac. Clips of your mouth stay in `data/` and
-are never uploaded. Claude only gets text: what you said or typed, a short, privacy-checked summary of the window in front
+are never uploaded. Eye tracking calibrates itself from where you click, type and look; all it keeps for that is
+numbers about your eyes and head with a screen point, also in `data/` (no pictures, no keys, nothing on screen).
+Claude only gets text: what you said or typed, a short, privacy-checked summary of the window in front
 (SCREEN in the menu turns it off), notifications from the last few minutes (never codes or passwords), and what it
 reads on screen when you ask it to act. The glass lens bends a small patch of screen under your gaze on the fly;
 that patch is never kept or sent.

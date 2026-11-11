@@ -571,14 +571,18 @@ def run_live(args):
     notif_q, ui["notify"], ui["notifs"] = queue.Queue(), settings.get("notifications", True), []
     notif_watch = notify.Watcher(notif_q.put)
     notif_watch.enabled = ui["notify"]
-    # where you're looking (gaze.py): camera iris + head pose (+ AirPods), after /gaze calibrate
+    # where you're looking (gaze.py): camera iris + head pose (+ AirPods). It calibrates itself from what you click,
+    # type and look at (gaze_passive.py); /gaze calibrate is optional
     try:  # MLX keeps freed GPU buffers around for reuse; a small cap stops that growing to gigabytes
         import mlx.core as _mx
         _mx.set_cache_limit(256 * 1024 * 1024)
     except Exception:
         pass
     import gaze as gaze_mod
+    import gaze_passive
     gazer = gaze_mod.Gaze(DATA / "gaze.json")
+    teacher = gaze_passive.Teacher(caret=gaze_passive.caret_rect)
+    pop_ups = gaze_passive.WindowWatch(skip=lambda: not (ui["open"] and gazer.learning))  # small windows coming up
     ui["gaze"] = settings.get("gaze", True)
     ui["lens"] = gazer.lens_on = settings.get("gaze_lens", True)
     # self-improvement (improve.py): learns shortcuts and per-app tips once a day while you're idle
@@ -752,8 +756,8 @@ def run_live(args):
     from AppKit import NSEvent as _NSEv
     esc_monitor = _NSEv.addGlobalMonitorForEventsMatchingMask_handler_(1 << 10, on_escape)  # (key down)
     SAVE_CLIPS[0] = labels.enabled = settings.get("save_clips", True)
-    gazer.learn_clicks = settings.get("gaze_clicks", True)
-    clicks_q = queue.Queue()  # your clicks, for gaze to learn from (gaze.add_click)
+    gazer.learning = settings.get("gaze_clicks", True)
+    clicks_q = queue.Queue()  # your clicks, for gaze to learn from (gaze_passive.Teacher)
 
     def on_click(event):
         from AppKit import NSEvent
@@ -817,9 +821,9 @@ def run_live(args):
 
     def screen_soon(look=None):
         """Start reading the screen now (in the background), for the message that's about to be sent. look: where
-        their eyes were while they spoke (x, y), if gaze is calibrated."""
+        their eyes were while they spoke (x, y), once gaze has learned enough to say."""
         if ui["screen"]:
-            g = (look[0], look[1], max(60.0, gazer.radius)) if look and ui["gaze"] and gazer.ready else None
+            g = (look[0], look[1], max(60.0, gazer.radius)) if look and ui["gaze"] and gazer.warm else None
             screen["future"], screen["at"] = ctx_pool.submit(screen_read, g), time.monotonic()
 
     def screen_now():
@@ -829,7 +833,7 @@ def run_live(args):
         fut = screen["future"] if screen["future"] is not None and time.monotonic() - screen["at"] < 10 else None
         screen["future"] = None
         if fut is None:  # (typed, or nothing started early): where they looked in the last couple of seconds
-            pt = gazer.point(time.monotonic() - 2.0, time.monotonic()) if ui["gaze"] and gazer.ready else None
+            pt = gazer.point(time.monotonic() - 2.0, time.monotonic()) if ui["gaze"] and gazer.warm else None
             fut = ctx_pool.submit(screen_read, (pt[0], pt[1], max(60.0, gazer.radius)) if pt else None)
         try:
             ctx = fut.result(timeout=0.8)
@@ -870,6 +874,8 @@ def run_live(args):
         if b["app"] in ("Silent Chat", HOST) or not ui["notify"]:
             return
         line = notify.describe(b)
+        f0 = NSScreen.screens()[0].frame().size  # its banner slides in at the top right: do the eyes go to it? (gaze)
+        teacher.appeared(now - 0.3, (f0.width - 372, 36, 356, 84))
         ui["notifs"] = [n for n in ui["notifs"] if now - n["at"] < 180][-2:] + [{**b, "at": now, "line": line}]
         print(f"[notification] {line}", flush=True)
         if not ui["open"] and not ui["ambient"]:  # (the island shows them with the camera off too)
@@ -1077,7 +1083,7 @@ def run_live(args):
                 "handsfree": ui["handsfree"], "screen": ui["screen"], "notify": ui["notify"], "lens": ui["lens"],
                 "ambient": ui["ambient"], "gaze": ui["gaze"], "warp": ui["warp"],
                 "improve": improve.load().get("enabled", True), "clips": SAVE_CLIPS[0],
-                "remember": settings.get("remember", True), "clicks": gazer.learn_clicks,
+                "remember": settings.get("remember", True), "clicks": gazer.learning,
                 "nudges": settings.get("nudges", False)}
     menu = StatusMenu(typed.put, settings_state, args.toggle_key)
     import settings_window
@@ -1665,12 +1671,26 @@ def run_live(args):
                 frame = cam._read()
                 now = time.monotonic()
                 level = activity(np.ascontiguousarray(frame[..., ::-1]), now)
-                while not clicks_q.empty():
-                    note = gazer.add_click(*clicks_q.get())
-                    if note:
-                        print("[gaze] " + note, flush=True)
                 gazer.update(now, activity.landmarks, activity.matrix, activity.blend,
                              airpods.latest() if airpods is not None else None)
+                # gaze teaches itself from the moments it can guess where you're looking (gaze_passive.py)
+                while not clicks_q.empty():
+                    teacher.click(*clicks_q.get())
+                if toggle and toggle.last_key != amb.get("key_seen") and now - typer.LAST_SYNTHETIC[0] > 0.5:
+                    amb["key_seen"] = toggle.last_key
+                    if gazer.learning:
+                        teacher.key(toggle.last_key)  # (when a key was pressed, not which)
+                for at, rect in pop_ups.seen():
+                    teacher.appeared(at, rect)
+                if gazer.cal is not None:
+                    teacher.radius, teacher.cold, teacher.screen = gazer.radius, not gazer.warm, gazer.cal.geom["screen"]
+                mouse = NSEvent.mouseLocation()
+                teacher.frame(now, gazer.last_feats if gazer.calib is None else None, gazer.raw,
+                              (mouse.x, NSScreen.screens()[0].frame().size.height - mouse.y))
+                for hint in teacher.hints():
+                    note = gazer.learn(hint)
+                    if note:
+                        print("[gaze] " + note, flush=True)
                 if gazer.calib is not None:
                     r = gazer.step_calibration(now)
                     if r is not None:
@@ -1696,6 +1716,8 @@ def run_live(args):
                 time.sleep(0.03)
                 frame, level = None, None
                 gazer.hide_lens()
+                while not clicks_q.empty():  # (camera off: nothing to learn from them)
+                    clicks_q.get()
                 down = (not ui["open"] and not args.no_hold_dictation and hotkey.held()
                         and now - typer.LAST_SYNTHETIC[0] > 0.5)
                 activity.blend, activity.landmarks = {}, None
@@ -1897,12 +1919,12 @@ def run_live(args):
                     secs = float(rest.split()[1]) if len(rest.split()) > 1 else 20
                     gazer.show(secs)
                     notice = ("A ring follows your gaze for a while." if gazer.ready else
-                              "Calibrate first: /gaze calibrate (or the menu bar).")
+                              "No gaze yet: it starts when the camera sees your face.")
                 elif cmd == "/gaze" and rest.strip().startswith("where"):
                     w = rest.split()
                     n, gap = (int(w[1]) if len(w) > 1 else 5), (float(w[2]) if len(w) > 2 else 4.0)
                     if not (gazer.ready and ui["open"]):
-                        notice = "Show silent chat (camera on) and calibrate first."
+                        notice = "Show silent chat first (tap \\): it needs the camera."
                     else:
                         ui["gaze_where"] = [time.monotonic() + gap * (i + 1) for i in range(n)]
                         notice = f"Look at a button; every {gap:.0f} s a tick reads what you look at (presses nothing)."
@@ -1976,9 +1998,9 @@ def run_live(args):
                         elif what == "remember" and not flag:
                             recent_file.unlink(missing_ok=True)  # (and forget what was kept)
                         elif what == "clicks":
-                            gazer.learn_clicks = flag
+                            gazer.learning = flag
                         notice = {"clips": "Saving mouth clips for training", "remember": "Remembering the conversation "
-                                  "across restarts", "clicks": "Learning gaze from your clicks"}[what] + \
+                                  "across restarts", "clicks": "Learning gaze as you work"}[what] + \
                             (" on." if flag else " off.")
                 elif cmd == "/stats":
                     import stats
@@ -2031,16 +2053,18 @@ def run_live(args):
                     ui["lens"] = (arg == "on") if arg else not ui["lens"]
                     gazer.lens_on = ui["lens"]
                     save_setting("gaze_lens", ui["lens"])
-                    notice = ("Glass circle on: it follows your gaze while silent chat is showing." +
-                              ("" if gazer.ready else " Calibrate gaze first.")) if ui["lens"] else "Glass circle off."
+                    notice = "Glass circle on: it follows your gaze while silent chat is showing." if ui["lens"] \
+                        else "Glass circle off."
                 elif cmd == "/gaze" and rest.strip() in ("on", "off"):
                     ui["gaze"] = rest.strip() == "on"
                     save_setting("gaze", ui["gaze"])
                     notice = f"Gaze {'on: Claude knows what you look at when you say this' if ui['gaze'] else 'off'}."
+                elif cmd == "/gaze" and rest.strip() == "reset":
+                    gazer.reset()
+                    notice = "Gaze: forgot what it had learned about your eyes on this screen. It starts learning again now."
+                    print("[gaze] reset", flush=True)
                 elif cmd == "/gaze":
-                    print("[gaze] " + (gaze_mod.describe(gazer.info) + f" (calibrated {gazer.info.get('date')})"
-                                       if gazer.ready else "not calibrated: /gaze calibrate") +
-                          f"; {'on' if ui['gaze'] else 'off'}; head: "
+                    print("[gaze] " + gazer.status() + f"; {'on' if ui['gaze'] else 'off'}; head: "
                           f"{'AirPods + camera' if gazer.head.gain != (0.0, 0.0) else 'camera'}; glass circle "
                           + (("showing" if gazer.lens.shown else "hidden") + (
                               f", bend {gazer.lens.warper.frames} frames, {gazer.lens.warper.busy * 1000:.0f} ms each"
@@ -2597,7 +2621,7 @@ def run_live(args):
                     pres.poke(now, 6)
                 pres.content(now, (tuple(conversation[-3:]), notice),
                              " ".join(t for _, t in conversation[-2:]) + " " + notice)
-                gp = gazer.point(now - 0.4, now) if gazer.ready and ui["gaze"] else None
+                gp = gazer.point(now - 0.4, now) if gazer.warm and ui["gaze"] else None
                 ix, iy, iw, ih = isl.rect()
                 # hovering the island (or the bare notch) opens the chat with a text box; it closes when you leave
                 mp = NSEvent.mouseLocation()
@@ -2704,6 +2728,13 @@ def run_live(args):
                     votable = None
                 isl.update(ind=ind, amp=amp, lines=show_lines, playing=playing, field=want_field and vis, visible=vis,
                            votable=votable if not playing else None)
+                if not (vis and show_lines):
+                    amb["isl_at"] = None
+                elif amb.get("isl_at") is None:
+                    amb["isl_at"] = now
+                elif amb["isl_at"] and now - amb["isl_at"] > 0.5:  # it has opened with something to read: do the
+                    teacher.appeared(amb["isl_at"], isl.rect())    # eyes go to it? (gaze learns from that)
+                    amb["isl_at"] = 0.0
                 if ui.get("focus_field") and not isl.field.isHidden():  # (once it has opened)
                     ui["focus_field"] = False
                     isl.focus_field()
@@ -2731,6 +2762,7 @@ def run_live(args):
             dictation["session"].close()
         panel.close()
         cam.close()
+        gazer.save()
         activity.close()
         reader.close()
         lip_pool.shutdown(wait=False, cancel_futures=True)
